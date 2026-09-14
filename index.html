@@ -1,0 +1,1113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tour</title>
+<style>
+:root {
+  --bg: #f7f7f5; --fg: #1f2328; --muted: #6b7280; --border: #d9dce1; --panel: #ffffff;
+  --accent: #2f6fed; --accent-bg: #e8f0fe;
+  --add-bg: #e6f7e9; --add-gut: #cdeed5; --del-bg: #fdecec; --del-gut: #f6cfcf;
+  --sel-bg: #fff1b8; --stop-bg: #e3ecfd; --dim: #9aa3ad;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --code-size: 13px;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { font: 14px/1.45 var(--sans); color: var(--fg); background: var(--bg); }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+button, select, input, textarea { font: inherit; color: inherit; }
+button { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; cursor: pointer; white-space: nowrap; }
+button:hover { background: #eef0f3; }
+button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+button.primary:hover { background: #245ccc; }
+button.danger { color: #b42318; }
+button.small { padding: 1px 7px; font-size: 12px; }
+input[type=text], select, textarea { border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; background: var(--panel); }
+input[type=text]:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-bg); border-color: var(--accent); }
+textarea { width: 100%; resize: vertical; }
+label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 2px; }
+kbd { font: 11px var(--mono); background: #eef0f3; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; }
+.muted { color: var(--muted); }
+.error { background: #fdecec; color: #b42318; border: 1px solid #f6cfcf; padding: 8px 12px; border-radius: 6px; margin: 12px; }
+.badge { display: inline-block; font-size: 10px; font-weight: 600; padding: 0 6px; border-radius: 10px; text-transform: uppercase; letter-spacing: .04em; line-height: 16px; vertical-align: middle; }
+.badge.change { background: #e3ecfd; color: #1d4ed8; }
+.badge.context { background: #e8eaee; color: #4b5563; }
+.badge.question { background: #fff1b8; color: #92400e; }
+.mono { font-family: var(--mono); }
+.sha { font-family: var(--mono); font-size: 12px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.grow { flex: 1; }
+
+/* syntax tokens */
+.t-kw { color: #8250df; font-weight: 600; }
+.t-string { color: #0a7f5a; }
+.t-comment { color: #8b949e; font-style: italic; }
+.t-number { color: #b35c00; }
+.t-pp { color: #b42318; }
+.t-fn { color: #1d4ed8; }
+.t-dec { color: #b35c00; }
+
+/* ---------- home ---------- */
+.home { max-width: 880px; margin: 0 auto; padding: 32px 20px; }
+.home h1 { font-size: 22px; margin: 0 0 4px; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin: 16px 0; }
+.card h2 { font-size: 15px; margin: 0 0 12px; }
+.review-list { list-style: none; margin: 0; padding: 0; }
+.review-list li { display: flex; gap: 12px; align-items: baseline; padding: 8px 0; border-top: 1px solid var(--border); }
+.review-list li:first-child { border-top: 0; }
+.review-list .t { font-weight: 600; flex: 1; }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.form-grid .wide { grid-column: 1 / -1; }
+.form-grid input, .form-grid select { width: 100%; }
+
+/* ---------- author ---------- */
+.author { display: grid; grid-template-rows: auto 1fr; height: 100vh; }
+.topbar { display: flex; gap: 10px; align-items: center; padding: 6px 12px; background: var(--panel); border-bottom: 1px solid var(--border); }
+.topbar .title { font-weight: 600; font-size: 15px; border: 1px solid transparent; border-radius: 6px; padding: 3px 6px; min-width: 240px; background: transparent; }
+.topbar .title:hover, .topbar .title:focus { border-color: var(--border); background: var(--panel); }
+.saved { font-size: 12px; color: var(--muted); min-width: 60px; }
+.saved.dirty { color: #b35c00; }
+.saved.err { color: #b42318; font-weight: 600; }
+.author-body { display: grid; grid-template-columns: 230px 1fr 360px; min-height: 0; }
+.pane { min-height: 0; overflow: auto; border-right: 1px solid var(--border); background: var(--panel); }
+.pane:last-child { border-right: 0; }
+.pane h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0; padding: 10px 12px 6px; position: sticky; top: 0; background: var(--panel); z-index: 1; }
+.file-list { list-style: none; margin: 0; padding: 0 0 12px; }
+.file-list li { padding: 5px 12px; cursor: pointer; display: flex; gap: 6px; align-items: baseline; font-size: 13px; }
+.file-list li:hover { background: #f3f4f6; }
+.file-list li.active { background: var(--accent-bg); }
+.file-list .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.file-list .name span { direction: ltr; unicode-bidi: bidi-override; }
+.file-list .n { font-size: 11px; color: var(--muted); }
+.file-list .st { font-size: 10px; font-weight: 700; width: 12px; }
+.file-list .st.added { color: #0a7f5a; } .file-list .st.deleted { color: #b42318; } .file-list .st.renamed { color: #b35c00; }
+.diff-pane { display: flex; flex-direction: column; background: var(--bg); }
+.diff-tools { display: flex; gap: 8px; align-items: center; padding: 6px 12px; border-bottom: 1px solid var(--border); background: var(--panel); font-size: 13px; position: sticky; top: 0; z-index: 2; }
+.diff-tools .path { font-family: var(--mono); font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diff-scroll { flex: 1; overflow: auto; }
+table.diff { border-collapse: collapse; width: 100%; font: var(--code-size)/1.5 var(--mono); table-layout: fixed; }
+table.diff td { padding: 0 6px; vertical-align: top; white-space: pre-wrap; word-break: break-all; }
+table.diff td.gut { width: 52px; text-align: right; color: var(--dim); user-select: none; cursor: pointer; background: #f0f1f3; border-right: 1px solid var(--border); }
+table.diff td.gut:hover { background: #e2e5ea; color: var(--fg); }
+table.diff tr.add td.code { background: var(--add-bg); }
+table.diff tr.del td.code { background: var(--del-bg); }
+table.diff tr.add td.gut { background: var(--add-gut); }
+table.diff tr.del td.gut { background: var(--del-gut); }
+table.diff td.code.add { background: var(--add-bg); }
+table.diff td.code.del { background: var(--del-bg); }
+table.diff td.code.empty { background: #f5f5f4; }
+table.diff tr.hunk td { background: #eef1f7; color: #4b5563; font-size: 11px; padding: 3px 8px; user-select: none; }
+table.diff tr.sel td.code { background: var(--sel-bg) !important; }
+table.diff tr.sel td.gut { background: #f3dd7a !important; color: #3b2f00; }
+table.diff td.stop-range { box-shadow: inset 3px 0 0 var(--accent); }
+table.diff tr.stop-range td.code { background: var(--stop-bg); }
+table.diff .tag { display: inline-block; width: 1ch; color: var(--muted); user-select: none; }
+table.diff tr.editor-row td { padding: 8px 12px; background: #fffbe6; border-top: 1px solid #f3dd7a; border-bottom: 1px solid #f3dd7a; white-space: normal; font: 14px var(--sans); }
+.editor-row textarea { font-family: var(--sans); min-height: 60px; }
+.empty-msg { padding: 40px 20px; color: var(--muted); text-align: center; }
+
+.stops-pane { display: flex; flex-direction: column; }
+.stop-list { list-style: none; margin: 0; padding: 0 0 8px; flex: 1; overflow: auto; }
+.stop-list li { padding: 6px 10px 6px 8px; border-bottom: 1px solid #eef0f3; cursor: pointer; display: grid; grid-template-columns: 14px 1fr; gap: 6px; align-items: start; }
+.stop-list li:hover { background: #f3f4f6; }
+.stop-list li.active { background: var(--accent-bg); }
+.stop-list li.dragging { opacity: .4; }
+.stop-list .grip { color: #c4c8cf; cursor: grab; line-height: 1.3; }
+.stop-list .loc { font-family: var(--mono); font-size: 12px; display: flex; gap: 6px; align-items: center; }
+.stop-list .loc .idx { color: var(--muted); min-width: 22px; }
+.stop-list .loc .f { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stop-list .note1 { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stop-list .note1.empty { font-style: italic; }
+.stop-edit { border-top: 1px solid var(--border); padding: 10px 12px; background: #fafafa; display: grid; gap: 8px; }
+.stop-edit .loc { font-family: var(--mono); font-size: 12px; }
+.stop-edit textarea { font-family: var(--sans); }
+.hint { font-size: 12px; color: var(--muted); padding: 6px 12px; border-top: 1px solid var(--border); }
+
+/* ---------- walkthrough ---------- */
+.walk { display: grid; grid-template-rows: auto 1fr; height: 100vh; background: #fbfbfa; }
+.walk-head { display: flex; gap: 18px; align-items: baseline; padding: 8px 20px; border-bottom: 1px solid var(--border); background: var(--panel); font-size: 15px; }
+.walk-head .title { font-weight: 600; font-size: 17px; }
+.walk-head .loc { font-family: var(--mono); color: #374151; }
+.walk-head .pos { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.walk-head .mode { font-size: 12px; color: #b35c00; }
+.walk-body { display: grid; grid-template-columns: 1fr 400px; min-height: 0; }
+.walk-code { overflow: auto; padding: 12px 0; font-family: var(--mono); line-height: 1.5; }
+.walk-code .ln { display: flex; white-space: pre-wrap; word-break: break-all; padding: 0 16px 0 0; }
+.walk-code .ln .no { width: 5ch; flex: none; text-align: right; padding-right: 1.5ch; color: var(--dim); user-select: none; }
+.walk-code .ln .tag { width: 1.5ch; flex: none; color: var(--muted); user-select: none; }
+.walk-code .ln.dim { opacity: .42; }
+.walk-code .ln.in { background: #fff6cc; box-shadow: inset 4px 0 0 #f0b429; }
+.walk-code .ln.in .no { color: #7a5a00; }
+.walk-code .ln.add { background: var(--add-bg); }
+.walk-code .ln.del { background: var(--del-bg); }
+.walk-code .ln.add.in { background: #d7f0dc; }
+.walk-code .ln.del.in { background: #f7d8d8; }
+.walk-code .hunk { color: #6b7280; background: #eef1f7; padding: 2px 16px; margin: 6px 0; font-size: .85em; }
+.walk-code .gap { text-align: center; color: var(--dim); padding: 4px; }
+.walk-note { border-left: 1px solid var(--border); background: var(--panel); overflow: auto; padding: 18px 22px; font-size: 17px; line-height: 1.5; }
+.walk-note .badge { font-size: 12px; line-height: 20px; margin-bottom: 8px; }
+.walk-note p { margin: 0 0 12px; }
+.walk-note ul { margin: 0 0 12px; padding-left: 22px; }
+.walk-note code { font-family: var(--mono); font-size: .9em; background: #f0f1f3; padding: 1px 4px; border-radius: 4px; }
+.walk-note pre { background: #f0f1f3; padding: 8px 10px; border-radius: 6px; overflow: auto; font-size: .85em; }
+.walk-note .flags { margin-top: 20px; border-top: 1px dashed var(--border); padding-top: 10px; font-size: 14px; }
+.walk-note .flags li { margin: 4px 0; }
+.walk-note .empty { color: var(--muted); font-style: italic; }
+@media (max-width: 1000px) {
+  .walk-body { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
+  .walk-note { border-left: 0; border-top: 1px solid var(--border); max-height: 40vh; }
+}
+.overlay { position: fixed; inset: 0; background: rgba(20, 24, 32, .55); display: flex; align-items: center; justify-content: center; z-index: 10; }
+.overlay .box { background: var(--panel); border-radius: 10px; padding: 20px 26px; min-width: 320px; max-width: 560px; box-shadow: 0 20px 60px rgba(0,0,0,.3); font-size: 15px; }
+.overlay h2 { margin: 0 0 12px; font-size: 16px; }
+.overlay table { border-collapse: collapse; }
+.overlay td { padding: 3px 14px 3px 0; vertical-align: top; }
+.goto { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #1f2328; color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 16px; z-index: 10; font-family: var(--mono); }
+.toast { position: fixed; bottom: 20px; right: 20px; background: #1f2328; color: #fff; padding: 8px 14px; border-radius: 8px; font-size: 13px; z-index: 10; opacity: .92; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+'use strict';
+
+/* =========================================================================
+ * Small helpers
+ * ========================================================================= */
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// h('div', {class: 'x', onclick: fn}, child, child...)
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  if (attrs) for (const [k, v] of Object.entries(attrs)) {
+    if (v == null || v === false) continue;
+    if (k === 'class') el.className = v;
+    else if (k === 'html') el.innerHTML = v;
+    else if (k === 'value') el.value = v;
+    else if (k === 'checked' || k === 'selected' || k === 'disabled') el[k] = !!v;
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  for (const kid of kids.flat(Infinity)) {
+    if (kid == null || kid === false) continue;
+    el.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  }
+  return el;
+}
+
+async function api(method, url, body) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  const res = await fetch(url, opts);
+  let data;
+  try { data = await res.json(); } catch (e) { data = { error: res.statusText || ('HTTP ' + res.status) }; }
+  if (!res.ok) throw new Error(data && data.error ? data.error : ('HTTP ' + res.status));
+  return data;
+}
+
+function short(sha) { return (sha || '').slice(0, 10); }
+
+function firstLine(s) { return String(s || '').split('\n').find(l => l.trim()) || ''; }
+
+function isTyping(e) {
+  const t = e.target;
+  return t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+}
+
+let toastTimer = null;
+function toast(msg) {
+  let el = document.querySelector('.toast');
+  if (!el) { el = h('div', { class: 'toast' }); document.body.append(el); }
+  el.textContent = msg;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.remove(), 2500);
+}
+
+/* =========================================================================
+ * Syntax highlighting: line-oriented regex tokenizers.  Good enough, not a parser.
+ * Multi-line state (C block comments, JS template strings, Python triple quotes)
+ * is threaded through `state` from one line to the next.
+ * ========================================================================= */
+
+const KEYWORDS = {
+  c: 'auto break case char const continue default do double else enum extern float for goto if inline int long register restrict return short signed sizeof static struct switch typedef union unsigned void volatile while _Bool _Complex _Static_assert bool true false NULL size_t ssize_t uint8_t uint16_t uint32_t uint64_t int8_t int16_t int32_t int64_t',
+  python: 'False None True and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield self cls',
+  js: 'break case catch class const continue debugger default delete do else export extends finally for function if import in instanceof let new return super switch this throw try typeof var void while with yield async await of static get set null undefined true false',
+};
+for (const k in KEYWORDS) KEYWORDS[k] = new Set(KEYWORDS[k].split(' '));
+
+function langFor(path) {
+  const m = /\.([^./]+)$/.exec(path || '');
+  const ext = m ? m[1].toLowerCase() : '';
+  if (['c', 'h', 'cc', 'cpp', 'cxx', 'hpp', 'hh', 'hxx', 'inl'].includes(ext)) return 'c';
+  if (['py', 'pyi'].includes(ext)) return 'python';
+  if (['js', 'mjs', 'cjs', 'jsx', 'ts', 'json'].includes(ext)) return 'js';
+  return null;
+}
+
+const STR_RE = {
+  c: /^(?:"(?:\\.|[^"\\])*"?|'(?:\\.|[^'\\])*'?)/,
+  js: /^(?:"(?:\\.|[^"\\])*"?|'(?:\\.|[^'\\])*'?)/,
+  python: /^(?:[rRbBuUfF]{1,2})?(?:"(?:\\.|[^"\\])*"?|'(?:\\.|[^'\\])*'?)/,
+};
+const NUM_RE = /^(?:0[xX][0-9a-fA-F']+|0[bB][01]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)[uUlLfFjJn]*/;
+const IDENT_RE = /^[A-Za-z_$][\w$]*/;
+const MULTI_END = { comment: '*/', tstr: '`', py3d: '"""', py3s: "'''" };
+
+function hlLine(line, lang, state) {
+  if (!lang) return { html: esc(line), state: null };
+  let out = '';
+  let i = 0;
+  const push = (cls, t) => { out += cls ? '<span class="t-' + cls + '">' + esc(t) + '</span>' : esc(t); };
+  if (state) {
+    const end = MULTI_END[state];
+    const cls = state === 'comment' ? 'comment' : 'string';
+    const j = line.indexOf(end);
+    if (j < 0) { push(cls, line); return { html: out, state }; }
+    push(cls, line.slice(0, j + end.length));
+    i = j + end.length;
+    state = null;
+  }
+  if (lang === 'c' && i === 0 && /^\s*#/.test(line)) { push('pp', line); return { html: out, state: null }; }
+  while (i < line.length) {
+    const rest = line.slice(i);
+    let m;
+    if (lang !== 'python' && rest.startsWith('//')) { push('comment', rest); break; }
+    if (lang === 'python' && rest[0] === '#') { push('comment', rest); break; }
+    if (lang !== 'python' && rest.startsWith('/*')) {
+      const j = rest.indexOf('*/', 2);
+      if (j < 0) { push('comment', rest); return { html: out, state: 'comment' }; }
+      push('comment', rest.slice(0, j + 2)); i += j + 2; continue;
+    }
+    if (lang === 'python' && (m = /^(?:[rRbBuUfF]{1,2})?("""|''')/.exec(rest))) {
+      const q = m[1];
+      const j = rest.indexOf(q, m[0].length);
+      if (j < 0) { push('string', rest); return { html: out, state: q === '"""' ? 'py3d' : 'py3s' }; }
+      push('string', rest.slice(0, j + q.length)); i += j + q.length; continue;
+    }
+    if (lang === 'js' && rest[0] === '`') {
+      const j = rest.indexOf('`', 1);
+      if (j < 0) { push('string', rest); return { html: out, state: 'tstr' }; }
+      push('string', rest.slice(0, j + 1)); i += j + 1; continue;
+    }
+    if ((m = STR_RE[lang].exec(rest)) && m[0].length) { push('string', m[0]); i += m[0].length; continue; }
+    if ((m = NUM_RE.exec(rest))) { push('number', m[0]); i += m[0].length; continue; }
+    if ((m = IDENT_RE.exec(rest))) {
+      const w = m[0];
+      if (KEYWORDS[lang].has(w)) push('kw', w);
+      else if (/^\s*\(/.test(rest.slice(w.length))) push('fn', w);
+      else push(null, w);
+      i += w.length; continue;
+    }
+    if (lang === 'python' && (m = /^@[\w.]+/.exec(rest))) { push('dec', m[0]); i += m[0].length; continue; }
+    if ((m = /^\s+/.exec(rest))) { push(null, m[0]); i += m[0].length; continue; }
+    push(null, rest[0]); i += 1;
+  }
+  return { html: out, state: null };
+}
+
+function hlLines(lines, lang) {
+  let state = null;
+  return lines.map(l => { const r = hlLine(l, lang, state); state = r.state; return r.html; });
+}
+
+/* =========================================================================
+ * Minimal markdown: paragraphs, `code`, fenced code, lists, **bold**.
+ * ========================================================================= */
+
+function mdInline(s) {
+  s = esc(s);
+  s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+  return s.replace(/\n/g, '<br>');
+}
+
+function md(text) {
+  const parts = String(text || '').replace(/\r/g, '').split(/^```[^\n]*\n?/m);
+  let html = '';
+  parts.forEach((part, idx) => {
+    if (idx % 2 === 1) { html += '<pre>' + esc(part.replace(/\n$/, '')) + '</pre>'; return; }
+    for (const block of part.split(/\n\s*\n/)) {
+      const lines = block.split('\n').filter(l => l.trim() !== '');
+      if (!lines.length) continue;
+      if (lines.every(l => /^\s*[-*]\s+/.test(l))) {
+        html += '<ul>' + lines.map(l => '<li>' + mdInline(l.replace(/^\s*[-*]\s+/, '')) + '</li>').join('') + '</ul>';
+      } else if (lines.every(l => /^\s*\d+[.)]\s+/.test(l))) {
+        html += '<ol>' + lines.map(l => '<li>' + mdInline(l.replace(/^\s*\d+[.)]\s+/, '')) + '</li>').join('') + '</ol>';
+      } else if (/^#{1,3}\s/.test(lines[0]) && lines.length === 1) {
+        const lvl = /^#+/.exec(lines[0])[0].length;
+        html += '<h' + (lvl + 1) + '>' + mdInline(lines[0].replace(/^#+\s*/, '')) + '</h' + (lvl + 1) + '>';
+      } else {
+        html += '<p>' + mdInline(lines.join('\n')) + '</p>';
+      }
+    }
+  });
+  return html;
+}
+
+/* =========================================================================
+ * Diff rows: turn hunks into table rows for unified or side-by-side display.
+ * ========================================================================= */
+
+function hunkLabel(hk) { return '@@ -' + hk.old_start + ',' + hk.old_len + ' +' + hk.new_start + ',' + hk.new_len + ' @@'; }
+
+function unifiedRows(file) {
+  const rows = [];
+  file.hunks.forEach((hk, hi) => {
+    rows.push({ type: 'hunk', hunk: hi, text: hunkLabel(hk) });
+    let o = hk.old_start, n = hk.new_start;
+    for (const l of hk.lines) {
+      const tag = l[0], text = l.slice(1);
+      if (tag === '+') rows.push({ type: 'add', newNo: n++, text });
+      else if (tag === '-') rows.push({ type: 'del', oldNo: o++, text });
+      else rows.push({ type: 'ctx', oldNo: o++, newNo: n++, text });
+    }
+  });
+  return rows;
+}
+
+function sideRows(file) {
+  const rows = [];
+  file.hunks.forEach((hk, hi) => {
+    rows.push({ type: 'hunk', hunk: hi, text: hunkLabel(hk) });
+    let o = hk.old_start, n = hk.new_start, i = 0;
+    const L = hk.lines;
+    while (i < L.length) {
+      if (L[i][0] !== '+' && L[i][0] !== '-') {
+        const text = L[i].slice(1);
+        rows.push({ type: 'ctx', left: { no: o++, text }, right: { no: n++, text } });
+        i++; continue;
+      }
+      const dels = [], adds = [];
+      while (i < L.length && L[i][0] === '-') dels.push(L[i++].slice(1));
+      while (i < L.length && L[i][0] === '+') adds.push(L[i++].slice(1));
+      const k = Math.max(dels.length, adds.length);
+      for (let j = 0; j < k; j++) {
+        rows.push({
+          type: 'change',
+          left: j < dels.length ? { no: o++, text: dels[j], tag: 'del' } : null,
+          right: j < adds.length ? { no: n++, text: adds[j], tag: 'add' } : null,
+        });
+      }
+    }
+  });
+  return rows;
+}
+
+/* =========================================================================
+ * Router
+ * ========================================================================= */
+
+const app = document.getElementById('app');
+let current = null;  // { onKey(e), destroy() }
+
+document.addEventListener('keydown', e => { if (current && current.onKey) current.onKey(e); });
+window.addEventListener('hashchange', route);
+
+function route() {
+  if (current && current.destroy) current.destroy();
+  current = null;
+  app.innerHTML = '';
+  document.querySelectorAll('.overlay, .goto').forEach(el => el.remove());
+  const hash = location.hash.replace(/^#/, '');
+  const m = /^(author|walk)\/([^/]+)(?:\/(\d+))?$/.exec(hash);
+  if (!m) { current = homeView(); return; }
+  const id = decodeURIComponent(m[2]);
+  current = m[1] === 'author' ? authorView(id) : walkView(id, m[3] ? parseInt(m[3], 10) - 1 : 0);
+}
+
+function showError(err) {
+  app.innerHTML = '';
+  app.append(h('div', { class: 'error' }, String(err.message || err)), h('p', { style: 'padding:0 12px' }, h('a', { href: '#' }, 'Back to reviews')));
+}
+
+/* =========================================================================
+ * Home: list reviews, start a new one
+ * ========================================================================= */
+
+function homeView() {
+  document.title = 'Tour';
+  (async () => {
+    let cfg, reviews, refs, refsErr = null;
+    try {
+      [cfg, reviews] = await Promise.all([api('GET', '/api/config'), api('GET', '/api/reviews')]);
+      try { refs = await api('GET', '/api/refs'); } catch (e) { refsErr = e; }
+    } catch (e) { showError(e); return; }
+
+    const list = reviews.length
+      ? h('ul', { class: 'review-list' }, reviews.map(r => h('li', null,
+          h('a', { class: 't', href: '#author/' + encodeURIComponent(r.id) }, r.title || r.id),
+          h('span', { class: 'muted' }, r.stops + (r.stops === 1 ? ' stop' : ' stops')),
+          h('span', { class: 'muted' }, r.author),
+          h('span', { class: 'muted' }, (r.created || '').replace('T', ' ').slice(0, 16)),
+          h('a', { href: '#walk/' + encodeURIComponent(r.id) }, 'walk'),
+          h('a', { href: '#author/' + encodeURIComponent(r.id) }, 'edit'))))
+      : h('p', { class: 'muted' }, 'No reviews yet. Create one below; it is saved as ', h('code', null, cfg.tours_dir + '/<id>.json'), ' in the repo.');
+
+    let form;
+    if (refs) {
+      const opts = [];
+      const seen = new Set();
+      const add = (value, label) => { if (seen.has(value)) return; seen.add(value); opts.push(h('option', { value }, label)); };
+      for (const b of refs.branches) add(b.sha, b.name + '  ' + short(b.sha));
+      for (const t of refs.tags) add(t.sha, 'tag ' + t.name + '  ' + short(t.sha));
+      for (const c of refs.commits) add(c.sha, short(c.sha) + '  ' + c.subject);
+      const datalist = h('datalist', { id: 'refs' }, opts);
+      const title = h('input', { type: 'text', placeholder: 'e.g. IPC refactor', autofocus: true });
+      const base = h('input', { type: 'text', list: 'refs', value: refs.default_base, spellcheck: 'false', class: 'mono' });
+      const head = h('input', { type: 'text', list: 'refs', value: refs.default_head, spellcheck: 'false', class: 'mono' });
+      const btn = h('button', { class: 'primary' }, 'Create draft');
+      const msg = h('span', { class: 'muted' });
+      const submit = async (e) => {
+        e.preventDefault();
+        if (!title.value.trim()) { title.focus(); return; }
+        btn.disabled = true; msg.textContent = 'Diffing…';
+        try {
+          const r = await api('POST', '/api/draft', { base: base.value.trim(), head: head.value.trim(), title: title.value.trim() });
+          location.hash = '#author/' + encodeURIComponent(r.id);
+        } catch (err) { msg.textContent = err.message; btn.disabled = false; }
+      };
+      form = h('form', { class: 'form-grid', onsubmit: submit },
+        h('div', { class: 'wide' }, h('label', null, 'Title'), title),
+        h('div', null, h('label', null, 'Base (default: merge-base with main)'), base),
+        h('div', null, h('label', null, 'Head (default: HEAD)'), head),
+        datalist,
+        h('div', { class: 'wide row' }, btn, msg,
+          h('span', { class: 'muted grow' }),
+          h('span', { class: 'muted' }, 'Any revision works: branch, tag, hash, HEAD~3.')));
+    } else {
+      form = h('div', { class: 'error', style: 'margin:0' }, 'Cannot read git refs: ' + refsErr.message);
+    }
+
+    app.append(h('div', { class: 'home' },
+      h('h1', null, 'Tour'),
+      h('div', { class: 'muted' }, cfg.name, ' · reviews live in ', h('code', null, cfg.tours_dir + '/')),
+      h('div', { class: 'card' }, h('h2', null, 'Reviews'), list),
+      h('div', { class: 'card' }, h('h2', null, 'New review'), form)));
+    if (refs) app.querySelector('input[type=text]').focus();
+  })();
+  return {};
+}
+
+/* =========================================================================
+ * Author: build the stop list from a diff
+ * ========================================================================= */
+
+function authorView(id) {
+  const S = {
+    review: null, files: [], fileIdx: 0, mode: localStorage.getItem('tour.diffmode') || 'unified',
+    rows: [], sel: null, dragging: false, stopId: null, editorRow: null,
+    dirty: false, saveTimer: null, saving: false, saveErr: null,
+  };
+  const els = {};
+
+  /* ----- persistence ----- */
+  function scheduleSave() {
+    S.dirty = true; paintSaved();
+    clearTimeout(S.saveTimer);
+    S.saveTimer = setTimeout(save, 1000);
+  }
+  async function save(sync) {
+    clearTimeout(S.saveTimer);
+    if (!S.dirty) return;
+    S.saving = true; paintSaved();
+    try {
+      if (sync) {
+        await fetch('/api/review/' + encodeURIComponent(id), { method: 'PUT', keepalive: true,
+          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(S.review) });
+      } else {
+        await api('PUT', '/api/review/' + encodeURIComponent(id), S.review);
+      }
+      S.dirty = false; S.saveErr = null;
+    } catch (e) { S.saveErr = e.message; }
+    S.saving = false; paintSaved();
+    if (S.saveErr) S.dirty = true;
+  }
+  function paintSaved() {
+    if (!els.saved) return;
+    els.saved.className = 'saved' + (S.saveErr ? ' err' : S.dirty ? ' dirty' : '');
+    els.saved.textContent = S.saveErr ? 'save failed: ' + S.saveErr : S.saving ? 'saving…' : S.dirty ? 'unsaved' : 'saved';
+  }
+  const flushOnLeave = () => { if (S.dirty) save(true); };
+  window.addEventListener('beforeunload', flushOnLeave);
+
+  /* ----- stops ----- */
+  const stops = () => S.review.stops;
+  const stopById = sid => stops().find(s => s.id === sid);
+  function nextStopId() {
+    let n = 0;
+    for (const s of stops()) { const m = /^s(\d+)$/.exec(s.id); if (m) n = Math.max(n, +m[1]); }
+    return 's' + (n + 1);
+  }
+  function sideFile(f, side) { return side === 'base' ? (f.old_file || f.file) : (f.new_file || f.file); }
+
+  function selectStop(sid, opts) {
+    S.stopId = sid;
+    const st = stopById(sid);
+    if (st && !(opts && opts.noScroll)) {
+      const fi = S.files.findIndex(f => sideFile(f, st.side || 'head') === st.file || f.file === st.file);
+      if (fi >= 0 && fi !== S.fileIdx) { S.fileIdx = fi; renderFiles(); renderDiff(); }
+      scrollToStop(st);
+    }
+    renderStops();
+    renderStopEditor();
+    paintRows();
+  }
+
+  function scrollToStop(st) {
+    const rows = S.rows;
+    for (let i = 0; i < rows.length; i++) {
+      if (rowNo(rows[i], st.side || 'head') === st.start) {
+        const tr = els.tbody && els.tbody.children[i];
+        if (tr) tr.scrollIntoView({ block: 'center' });
+        return;
+      }
+    }
+  }
+
+  // The line number a row has on a given side, or 0.
+  function rowNo(row, side) {
+    if (row.type === 'hunk') return 0;
+    if (S.mode === 'unified') return (side === 'base' ? row.oldNo : row.newNo) || 0;
+    const c = side === 'base' ? row.left : row.right;
+    return c ? c.no : 0;
+  }
+
+  function addStop(range, kind, note) {
+    const st = { id: nextStopId(), file: range.file, start: range.start, end: range.end, side: range.side,
+                 kind, note, presenter_note: '', flags: [] };
+    stops().push(st);
+    S.sel = null;
+    scheduleSave();
+    selectStop(st.id, { noScroll: true });
+    toast('Added stop ' + stops().length);
+  }
+
+  function moveStop(sid, delta) {
+    const arr = stops();
+    const i = arr.findIndex(s => s.id === sid);
+    const j = i + delta;
+    if (i < 0 || j < 0 || j >= arr.length) return;
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+    scheduleSave(); renderStops();
+  }
+
+  function deleteStop(sid) {
+    const arr = stops();
+    const i = arr.findIndex(s => s.id === sid);
+    if (i < 0) return;
+    if (!confirm('Delete stop ' + (i + 1) + '?')) return;
+    arr.splice(i, 1);
+    S.stopId = arr[Math.min(i, arr.length - 1)] ? arr[Math.min(i, arr.length - 1)].id : null;
+    scheduleSave(); renderStops(); renderStopEditor(); paintRows();
+  }
+
+  /* ----- selection ----- */
+  function selectionRange() {
+    if (!S.sel || !S.files[S.fileIdx]) return null;
+    const lo = Math.min(S.sel.a, S.sel.b), hi = Math.max(S.sel.a, S.sel.b);
+    const file = S.files[S.fileIdx];
+    let side = S.sel.side, nums = [];
+    if (S.mode === 'unified') {
+      // Head side unless the selection contains removed lines and no added lines.
+      const heads = [], bases = [];
+      let adds = 0, dels = 0;
+      for (let i = lo; i <= hi; i++) {
+        const r = S.rows[i];
+        if (r.type === 'hunk') continue;
+        if (r.type === 'add') adds++; else if (r.type === 'del') dels++;
+        if (r.newNo) heads.push(r.newNo);
+        if (r.oldNo) bases.push(r.oldNo);
+      }
+      if (dels && !adds && bases.length) { side = 'base'; nums = bases; }
+      else if (heads.length) { side = 'head'; nums = heads; }
+      else { side = 'base'; nums = bases; }
+    } else {
+      for (let i = lo; i <= hi; i++) { const n = rowNo(S.rows[i], side); if (n) nums.push(n); }
+    }
+    if (!nums.length) return null;
+    return { side, start: Math.min(...nums), end: Math.max(...nums), file: sideFile(file, side) };
+  }
+
+  function clearSelection() { S.sel = null; closeEditor(); paintRows(); }
+
+  /* ----- inline note editor (press n) ----- */
+  function openEditor() {
+    const range = selectionRange();
+    if (!range) { toast('Select lines first: click-drag the line numbers.'); return; }
+    closeEditor();
+    const hi = Math.max(S.sel.a, S.sel.b);
+    const kind = h('select', null, ['change', 'context', 'question'].map(k => h('option', { value: k }, k)));
+    const note = h('textarea', { placeholder: 'Note shown to the room (markdown-ish). Enter saves, Shift+Enter for a new line, Esc cancels.', rows: 3 });
+    note.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); addStop(range, kind.value, note.value.trim()); closeEditor(); }
+      else if (e.key === 'Escape') { e.preventDefault(); closeEditor(); }
+      e.stopPropagation();
+    });
+    kind.addEventListener('keydown', e => { if (e.key === 'Escape') closeEditor(); e.stopPropagation(); });
+    const tr = h('tr', { class: 'editor-row' }, h('td', { colspan: S.mode === 'unified' ? 3 : 4 },
+      h('div', { class: 'row', style: 'margin-bottom:6px' },
+        h('b', null, 'New stop'), h('span', { class: 'mono' }, range.file + ':' + range.start + (range.end !== range.start ? '-' + range.end : '') + (range.side === 'base' ? ' (base)' : '')),
+        h('span', { class: 'grow' }), h('label', { style: 'margin:0' }, 'kind'), kind),
+      note,
+      h('div', { class: 'row', style: 'margin-top:6px' },
+        h('button', { class: 'primary small', onclick: () => { addStop(range, kind.value, note.value.trim()); closeEditor(); } }, 'Add stop'),
+        h('button', { class: 'small', onclick: closeEditor }, 'Cancel'))));
+    const after = els.tbody.children[hi];
+    after.after(tr);
+    S.editorRow = tr;
+    note.focus();
+  }
+  function closeEditor() { if (S.editorRow) { S.editorRow.remove(); S.editorRow = null; } }
+
+  /* ----- rendering ----- */
+  function renderFiles() {
+    els.files.innerHTML = '';
+    if (!S.files.length) { els.files.append(h('li', { class: 'muted' }, 'No changes between base and head.')); return; }
+    S.files.forEach((f, i) => {
+      const n = S.files === null ? 0 : stops().filter(s => s.file === f.file || s.file === f.old_file).length;
+      els.files.append(h('li', { class: i === S.fileIdx ? 'active' : '', title: f.file, onclick: () => { S.fileIdx = i; S.sel = null; renderFiles(); renderDiff(); } },
+        h('span', { class: 'st ' + f.status }, { added: 'A', deleted: 'D', renamed: 'R', modified: 'M' }[f.status] || 'M'),
+        h('span', { class: 'name' }, h('span', null, f.file)),
+        h('span', { class: 'n' }, f.binary ? 'bin' : f.hunks.length + (n ? ' · ' + n + '★' : ''))));
+    });
+  }
+
+  function renderDiff() {
+    closeEditor();
+    const f = S.files[S.fileIdx];
+    els.path.textContent = f ? (f.status === 'renamed' ? f.old_file + ' → ' + f.new_file : f.file) : '';
+    els.scroll.innerHTML = '';
+    if (!f) { els.scroll.append(h('div', { class: 'empty-msg' }, 'Nothing to show.')); S.rows = []; return; }
+    if (f.binary || !f.hunks.length) { els.scroll.append(h('div', { class: 'empty-msg' }, f.binary ? 'Binary file.' : 'No hunks (mode or rename only).')); S.rows = []; return; }
+    const lang = langFor(f.file);
+    const table = h('table', { class: 'diff ' + S.mode });
+    const cols = S.mode === 'unified' ? ['52px', '52px', ''] : ['52px', '', '52px', ''];
+    table.append(h('colgroup', null, cols.map(w => h('col', { style: w ? 'width:' + w : '' }))));
+    const tbody = h('tbody');
+    table.append(tbody);
+    if (S.mode === 'unified') {
+      S.rows = unifiedRows(f);
+      let state = null;
+      S.rows.forEach((r, i) => {
+        if (r.type === 'hunk') { state = null; tbody.append(h('tr', { class: 'hunk', 'data-i': i }, h('td', { colspan: 3 }, r.text))); return; }
+        const hl = hlLine(r.text, lang, state); state = hl.state;
+        tbody.append(h('tr', { class: r.type, 'data-i': i },
+          h('td', { class: 'gut old', 'data-side': 'base' }, r.oldNo || ''),
+          h('td', { class: 'gut new', 'data-side': 'head' }, r.newNo || ''),
+          h('td', { class: 'code', html: '<span class="tag">' + ({ add: '+', del: '-', ctx: ' ' })[r.type] + '</span>' + hl.html })));
+      });
+    } else {
+      S.rows = sideRows(f);
+      let ls = null, rs = null;
+      S.rows.forEach((r, i) => {
+        if (r.type === 'hunk') { ls = rs = null; tbody.append(h('tr', { class: 'hunk', 'data-i': i }, h('td', { colspan: 4 }, r.text))); return; }
+        let lh = '', rh = '';
+        if (r.left) { const x = hlLine(r.left.text, lang, ls); ls = x.state; lh = x.html; }
+        if (r.right) { const x = hlLine(r.right.text, lang, rs); rs = x.state; rh = x.html; }
+        tbody.append(h('tr', { class: r.type, 'data-i': i },
+          h('td', { class: 'gut old', 'data-side': 'base' }, r.left ? r.left.no : ''),
+          h('td', { class: 'code left ' + (r.left ? (r.left.tag || '') : 'empty'), html: lh }),
+          h('td', { class: 'gut new', 'data-side': 'head' }, r.right ? r.right.no : ''),
+          h('td', { class: 'code right ' + (r.right ? (r.right.tag || '') : 'empty'), html: rh })));
+      });
+    }
+    els.tbody = tbody;
+    els.scroll.append(table);
+    paintRows();
+  }
+
+  // Selection and current-stop highlighting, without rebuilding the table.
+  function paintRows() {
+    if (!els.tbody) return;
+    const st = S.stopId ? stopById(S.stopId) : null;
+    const f = S.files[S.fileIdx];
+    const stopHere = st && f && st.file === sideFile(f, st.side || 'head');
+    const lo = S.sel ? Math.min(S.sel.a, S.sel.b) : -1, hi = S.sel ? Math.max(S.sel.a, S.sel.b) : -1;
+    const trs = els.tbody.children;
+    for (let i = 0; i < S.rows.length; i++) {
+      const tr = trs[i];
+      if (!tr) break;
+      tr.classList.toggle('sel', i >= lo && i <= hi && S.rows[i].type !== 'hunk');
+      let inStop = false;
+      if (stopHere) { const n = rowNo(S.rows[i], st.side || 'head'); inStop = n >= st.start && n <= st.end; }
+      tr.classList.toggle('stop-range', inStop);
+    }
+  }
+
+  function renderStops() {
+    els.stops.innerHTML = '';
+    const arr = stops();
+    if (!arr.length) { els.stops.append(h('li', { class: 'muted', style: 'display:block' }, 'No stops yet. Select lines in the diff and press ', h('kbd', null, 'n'), '.')); return; }
+    arr.forEach((st, i) => {
+      const li = h('li', { class: st.id === S.stopId ? 'active' : '', draggable: 'true', 'data-id': st.id,
+        onclick: () => selectStop(st.id) },
+        h('span', { class: 'grip', title: 'drag to reorder' }, '⋮'),
+        h('div', null,
+          h('div', { class: 'loc' }, h('span', { class: 'idx' }, i + 1 + '.'), h('span', { class: 'badge ' + (st.kind || 'change') }, st.kind || 'change'),
+            h('span', { class: 'f', title: st.file }, st.file.split('/').pop() + ':' + st.start + (st.end !== st.start ? '-' + st.end : '') + (st.side === 'base' ? ' (base)' : ''))),
+          h('div', { class: 'note1' + (firstLine(st.note) ? '' : ' empty') }, firstLine(st.note) || 'no note yet')));
+      li.addEventListener('dragstart', e => { S.drag = st.id; li.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', st.id); } catch (_) {} });
+      li.addEventListener('dragend', () => { li.classList.remove('dragging'); if (S.drag) { S.drag = null; scheduleSave(); renderStops(); } });
+      li.addEventListener('dragover', e => {
+        e.preventDefault();
+        if (!S.drag || S.drag === st.id) return;
+        const a = arr.findIndex(s => s.id === S.drag), b = arr.findIndex(s => s.id === st.id);
+        if (a < 0 || b < 0) return;
+        const [moved] = arr.splice(a, 1);
+        arr.splice(b, 0, moved);
+        // Move the DOM node too so the drag keeps flowing without a re-render.
+        const dragEl = els.stops.querySelector('[data-id="' + S.drag + '"]');
+        if (dragEl) { if (a < b) li.after(dragEl); else li.before(dragEl); }
+        els.stops.querySelectorAll('.idx').forEach((el, k) => el.textContent = (k + 1) + '.');
+      });
+      els.stops.append(li);
+    });
+    els.stops.addEventListener('drop', e => e.preventDefault());
+  }
+
+  function renderStopEditor() {
+    els.edit.innerHTML = '';
+    const st = S.stopId ? stopById(S.stopId) : null;
+    if (!st) { els.edit.append(h('div', { class: 'muted' }, 'Select a stop to edit its note.')); return; }
+    const idx = stops().indexOf(st);
+    const kind = h('select', { value: st.kind || 'change', onchange: () => { st.kind = kind.value; scheduleSave(); renderStops(); } },
+      ['change', 'context', 'question'].map(k => h('option', { value: k, selected: k === (st.kind || 'change') }, k)));
+    const note = h('textarea', { rows: 5, value: st.note || '', placeholder: 'Note shown to the room. Paragraphs, `code`, - lists, **bold**.',
+      oninput: () => { st.note = note.value; scheduleSave(); renderStops(); } });
+    const pnote = h('textarea', { rows: 2, value: st.presenter_note || '', placeholder: 'Presenter-only note (never shown on the projector).',
+      oninput: () => { st.presenter_note = pnote.value; scheduleSave(); } });
+    els.edit.append(...[
+      h('div', { class: 'row' }, h('b', null, 'Stop ' + (idx + 1)), h('span', { class: 'loc grow' }, st.file + ':' + st.start + (st.end !== st.start ? '-' + st.end : '') + (st.side === 'base' ? ' (base)' : '')), kind),
+      h('div', null, h('label', null, 'Note'), note),
+      h('div', null, h('label', null, 'Presenter note'), pnote),
+      st.flags && st.flags.length ? h('div', { class: 'muted', style: 'font-size:12px' }, st.flags.length + ' flag(s) from walkthroughs: ', st.flags.map(f => h('div', null, '• ' + f.text + ' — ' + f.by))) : null,
+      h('div', { class: 'row' },
+        h('button', { class: 'small', onclick: () => moveStop(st.id, -1) }, '↑ up'),
+        h('button', { class: 'small', onclick: () => moveStop(st.id, 1) }, '↓ down'),
+        h('span', { class: 'grow' }),
+        h('button', { class: 'small danger', onclick: () => deleteStop(st.id) }, 'Delete')),
+    ].filter(Boolean));
+  }
+
+  function render() {
+    const r = S.review;
+    document.title = r.title + ' · Tour';
+    els.title = h('input', { class: 'title', type: 'text', value: r.title, oninput: () => { r.title = els.title.value; scheduleSave(); } });
+    els.saved = h('span', { class: 'saved' }, 'saved');
+    els.files = h('ul', { class: 'file-list' });
+    els.path = h('span', { class: 'path' });
+    els.scroll = h('div', { class: 'diff-scroll' });
+    els.stops = h('ul', { class: 'stop-list' });
+    els.edit = h('div', { class: 'stop-edit' });
+    const modeBtn = h('button', { class: 'small', onclick: () => { S.mode = S.mode === 'unified' ? 'side' : 'unified'; localStorage.setItem('tour.diffmode', S.mode); S.sel = null; modeBtn.textContent = S.mode === 'unified' ? 'side-by-side' : 'unified'; renderDiff(); } },
+      S.mode === 'unified' ? 'side-by-side' : 'unified');
+    app.append(h('div', { class: 'author' },
+      h('div', { class: 'topbar' },
+        h('a', { href: '#' }, '← reviews'),
+        els.title,
+        h('span', { class: 'muted sha' }, short(r.base) + ' → ' + short(r.head)),
+        h('span', { class: 'grow' }),
+        els.saved,
+        h('a', { href: '#walk/' + encodeURIComponent(id), class: 'primary', target: '_blank' }, h('button', { class: 'primary' }, 'Walk ▶'))),
+      h('div', { class: 'author-body' },
+        h('div', { class: 'pane' }, h('h3', null, 'Files (' + S.files.length + ')'), els.files),
+        h('div', { class: 'pane diff-pane' },
+          h('div', { class: 'diff-tools' }, els.path, modeBtn,
+            h('span', { class: 'muted', style: 'font-size:12px' }, 'drag line numbers, then ', h('kbd', null, 'n'))),
+          els.scroll),
+        h('div', { class: 'pane stops-pane' },
+          h('h3', null, 'Stops'),
+          els.stops,
+          els.edit,
+          h('div', { class: 'hint' }, h('kbd', null, 'n'), ' new stop from selection · ', h('kbd', null, 'Ctrl+↑/↓'), ' reorder · drag to reorder · ', h('kbd', null, 'Esc'), ' clear')))));
+
+    // Line-number selection: mousedown to anchor, drag to extend, shift-click to extend.
+    els.scroll.addEventListener('mousedown', e => {
+      const gut = e.target.closest('td.gut');
+      if (!gut) return;
+      e.preventDefault();
+      const tr = gut.closest('tr');
+      const i = +tr.dataset.i;
+      const side = gut.dataset.side;
+      if (e.shiftKey && S.sel) { S.sel.b = i; if (S.mode !== 'unified') S.sel.side = side; }
+      else S.sel = { a: i, b: i, side };
+      S.dragging = true;
+      closeEditor();
+      paintRows();
+    });
+    els.scroll.addEventListener('mouseover', e => {
+      if (!S.dragging || !S.sel) return;
+      const tr = e.target.closest('tr[data-i]');
+      if (!tr) return;
+      const i = +tr.dataset.i;
+      if (i !== S.sel.b) { S.sel.b = i; paintRows(); }
+    });
+    document.addEventListener('mouseup', onMouseUp);
+
+    renderFiles(); renderDiff(); renderStops(); renderStopEditor();
+    if (stops().length) selectStop(stops()[0].id);
+  }
+  function onMouseUp() { S.dragging = false; }
+
+  function onKey(e) {
+    if (e.key === 'Escape') { if (isTyping(e)) e.target.blur(); clearSelection(); return; }
+    if (isTyping(e)) return;
+    if (e.key === 'n' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); openEditor(); return; }
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && S.stopId) {
+      e.preventDefault(); moveStop(S.stopId, e.key === 'ArrowUp' ? -1 : 1); return;
+    }
+    if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !e.ctrlKey && !e.metaKey && stops().length) {
+      e.preventDefault();
+      const arr = stops();
+      const i = Math.max(0, arr.findIndex(s => s.id === S.stopId));
+      const j = Math.min(arr.length - 1, Math.max(0, i + (e.key === 'ArrowDown' ? 1 : -1)));
+      selectStop(arr[j].id);
+    }
+  }
+
+  (async () => {
+    try {
+      S.review = await api('GET', '/api/review/' + encodeURIComponent(id));
+      if (!Array.isArray(S.review.stops)) S.review.stops = [];
+      S.files = await api('GET', '/api/diff?base=' + encodeURIComponent(S.review.base) + '&head=' + encodeURIComponent(S.review.head));
+      render();
+    } catch (e) { showError(e); }
+  })();
+
+  return {
+    onKey,
+    destroy() {
+      window.removeEventListener('beforeunload', flushOnLeave);
+      document.removeEventListener('mouseup', onMouseUp);
+      flushOnLeave();
+    },
+  };
+}
+
+/* =========================================================================
+ * Walkthrough: the projector view
+ * ========================================================================= */
+
+function walkView(id, startIndex) {
+  const S = {
+    review: null, i: 0, mode: 'stop', files: new Map(), diff: null, goto: null, help: false,
+    font: parseInt(localStorage.getItem('tour.font'), 10) || 18, err: null,
+  };
+  const els = {};
+  const CONTEXT = 8;
+
+  const stops = () => S.review.stops || [];
+  const cur = () => stops()[S.i];
+  const revFor = st => (st.side === 'base' ? S.review.base : S.review.head);
+
+  async function getFile(path, rev) {
+    const key = rev + ':' + path;
+    if (!S.files.has(key)) {
+      S.files.set(key, api('GET', '/api/file?path=' + encodeURIComponent(path) + '&rev=' + encodeURIComponent(rev))
+        .then(r => ({ lines: r.lines, html: hlLines(r.lines, langFor(path)) })));
+    }
+    return S.files.get(key);
+  }
+  async function getDiff() {
+    if (!S.diff) S.diff = api('GET', '/api/diff?base=' + encodeURIComponent(S.review.base) + '&head=' + encodeURIComponent(S.review.head));
+    return S.diff;
+  }
+
+  function lineEl(no, html, cls, tag) {
+    return h('div', { class: 'ln ' + cls }, h('span', { class: 'no' }, no || ''), tag !== undefined ? h('span', { class: 'tag' }, tag) : null, h('span', { class: 'src', html }));
+  }
+
+  async function renderCode() {
+    const st = cur();
+    const code = els.code;
+    code.style.fontSize = S.font + 'px';
+    if (!st) { code.innerHTML = ''; code.append(h('div', { class: 'empty-msg' }, 'This review has no stops yet.')); return; }
+    const token = ++S.renderToken;
+    let frag;
+    try {
+      if (S.mode === 'diff') frag = await renderDiffCode(st);
+      else frag = await renderFileCode(st, S.mode === 'full');
+    } catch (e) {
+      frag = h('div', { class: 'error' }, e.message);
+    }
+    if (token !== S.renderToken) return;  // a newer render superseded this one
+    code.innerHTML = '';
+    code.append(frag);
+    const first = code.querySelector('.ln.in');
+    if (S.mode === 'full' && first) first.scrollIntoView({ block: 'center' });
+    else code.scrollTop = 0;
+    const next = stops()[S.i + 1];
+    if (next) getFile(next.file, revFor(next)).catch(() => {});
+  }
+
+  async function renderFileCode(st, full) {
+    const f = await getFile(st.file, revFor(st));
+    const n = f.lines.length;
+    const lo = full ? 1 : Math.max(1, st.start - CONTEXT);
+    const hi = full ? n : Math.min(n, st.end + CONTEXT);
+    const frag = document.createDocumentFragment();
+    if (!full && lo > 1) frag.append(h('div', { class: 'gap' }, '⋯ ' + (lo - 1) + ' lines above'));
+    for (let k = lo; k <= hi; k++) {
+      const inRange = k >= st.start && k <= st.end;
+      frag.append(lineEl(k, f.html[k - 1], inRange ? 'in' : 'dim'));
+    }
+    if (!full && hi < n) frag.append(h('div', { class: 'gap' }, '⋯ ' + (n - hi) + ' lines below'));
+    if (st.start > n) frag.append(h('div', { class: 'error' }, 'Stop range ' + st.start + '-' + st.end + ' is past the end of the file (' + n + ' lines).'));
+    return frag;
+  }
+
+  async function renderDiffCode(st) {
+    const files = await getDiff();
+    const side = st.side || 'head';
+    const f = files.find(x => (side === 'base' ? x.old_file : x.new_file) === st.file) || files.find(x => x.file === st.file);
+    const frag = document.createDocumentFragment();
+    if (!f) { frag.append(h('div', { class: 'gap' }, 'This file is not part of the diff.')); return frag; }
+    const lang = langFor(f.file);
+    let shown = 0;
+    for (const hk of f.hunks) {
+      const hs = side === 'base' ? hk.old_start : hk.new_start;
+      const hl = side === 'base' ? hk.old_len : hk.new_len;
+      if (hs + Math.max(hl, 1) - 1 < st.start - CONTEXT || hs > st.end + CONTEXT) continue;
+      shown++;
+      frag.append(h('div', { class: 'hunk' }, hunkLabel(hk)));
+      let o = hk.old_start, n = hk.new_start, state = null;
+      for (const l of hk.lines) {
+        const tag = l[0];
+        const x = hlLine(l.slice(1), lang, state); state = x.state;
+        let no, cls;
+        if (tag === '+') { no = n++; cls = 'add'; }
+        else if (tag === '-') { no = o++; cls = 'del'; }
+        else { no = side === 'base' ? o : n; o++; n++; cls = ''; }
+        const mine = tag === ' ' || (tag === '+' && side === 'head') || (tag === '-' && side === 'base');
+        const inRange = mine && no >= st.start && no <= st.end;
+        frag.append(lineEl(no, x.html, cls + (inRange ? ' in' : ' dim'), tag === ' ' ? ' ' : tag));
+      }
+    }
+    if (!shown) frag.append(h('div', { class: 'gap' }, 'No hunks in the diff overlap this stop.'));
+    return frag;
+  }
+
+  function renderNote() {
+    const st = cur();
+    els.note.innerHTML = '';
+    if (!st) return;
+    els.note.append(h('div', null, h('span', { class: 'badge ' + (st.kind || 'change') }, st.kind || 'change')));
+    if (st.note && st.note.trim()) els.note.append(h('div', { html: md(st.note) }));
+    else els.note.append(h('p', { class: 'empty' }, 'No note for this stop.'));
+    if (st.flags && st.flags.length) {
+      els.note.append(h('div', { class: 'flags' }, h('b', null, 'Flags'), h('ul', null, st.flags.map(f => h('li', null, f.text, ' ', h('span', { class: 'muted' }, '— ' + f.by))))));
+    }
+  }
+
+  function renderHead() {
+    const st = cur();
+    const total = stops().length;
+    els.loc.textContent = st ? st.file + ':' + st.start + (st.end !== st.start ? '-' + st.end : '') + (st.side === 'base' ? ' (base)' : '') : '';
+    els.pos.textContent = total ? 'stop ' + (S.i + 1) + ' / ' + total : 'no stops';
+    els.modeEl.textContent = S.mode === 'full' ? 'full file · Esc to return' : S.mode === 'diff' ? 'diff · d to return' : '';
+  }
+
+  function renderAll() { renderHead(); renderNote(); renderCode(); }
+
+  function go(i, opts) {
+    const total = stops().length;
+    if (!total) return;
+    S.i = Math.max(0, Math.min(total - 1, i));
+    if (!(opts && opts.keepMode)) S.mode = 'stop';
+    history.replaceState(null, '', '#walk/' + encodeURIComponent(id) + '/' + (S.i + 1));
+    renderAll();
+  }
+
+  function setFont(delta) {
+    S.font = Math.max(10, Math.min(48, S.font + delta));
+    localStorage.setItem('tour.font', String(S.font));
+    els.code.style.fontSize = S.font + 'px';
+  }
+
+  function showHelp() {
+    hideOverlays();
+    S.help = true;
+    const rows = [
+      ['Space / → / j', 'next stop'], ['← / k', 'previous stop'], ['Home / End', 'first / last stop'],
+      ['g then a number, Enter', 'jump to a stop'], ['f', 'open the full file at this point'],
+      ['d', 'show the diff for this stop instead of the file'], ['Esc', 'back to the current stop'],
+      ['+ / -', 'font size'], ['?', 'this help'],
+    ];
+    document.body.append(h('div', { class: 'overlay', onclick: hideOverlays },
+      h('div', { class: 'box' }, h('h2', null, 'Keys'),
+        h('table', null, rows.map(r => h('tr', null, h('td', null, h('kbd', null, r[0])), h('td', null, r[1])))),
+        h('p', { class: 'muted', style: 'margin:12px 0 0' }, 'Any key closes this.'))));
+  }
+  function hideOverlays() {
+    S.help = false; S.goto = null;
+    document.querySelectorAll('.overlay, .goto').forEach(el => el.remove());
+  }
+  function paintGoto() {
+    let el = document.querySelector('.goto');
+    if (S.goto === null) { if (el) el.remove(); return; }
+    if (!el) { el = h('div', { class: 'goto' }); document.body.append(el); }
+    el.textContent = 'go to stop: ' + S.goto + '_   (Enter, Esc)';
+  }
+
+  function onKey(e) {
+    if (!S.review) return;
+    if (S.help) { e.preventDefault(); hideOverlays(); return; }
+    if (S.goto !== null) {
+      e.preventDefault();
+      if (/^\d$/.test(e.key)) S.goto += e.key;
+      else if (e.key === 'Backspace') S.goto = S.goto.slice(0, -1);
+      else if (e.key === 'Enter') { const n = parseInt(S.goto, 10); S.goto = null; if (n >= 1) go(n - 1); }
+      else if (e.key === 'Escape') S.goto = null;
+      paintGoto();
+      return;
+    }
+    if (isTyping(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+    const k = e.key;
+    if (k === ' ' || k === 'ArrowRight' || k === 'j' || k === 'PageDown') { e.preventDefault(); go(S.i + 1); }
+    else if (k === 'ArrowLeft' || k === 'k' || k === 'PageUp') { e.preventDefault(); go(S.i - 1); }
+    else if (k === 'Home') { e.preventDefault(); go(0); }
+    else if (k === 'End') { e.preventDefault(); go(stops().length - 1); }
+    else if (k === 'f') { e.preventDefault(); S.mode = S.mode === 'full' ? 'stop' : 'full'; renderHead(); renderCode(); }
+    else if (k === 'd') { e.preventDefault(); S.mode = S.mode === 'diff' ? 'stop' : 'diff'; renderHead(); renderCode(); }
+    else if (k === 'Escape') { e.preventDefault(); S.mode = 'stop'; renderHead(); renderCode(); }
+    else if (k === 'g') { e.preventDefault(); S.goto = ''; paintGoto(); }
+    else if (k === '?') { e.preventDefault(); showHelp(); }
+    else if (k === '+' || k === '=') { e.preventDefault(); setFont(1); }
+    else if (k === '-' || k === '_') { e.preventDefault(); setFont(-1); }
+  }
+
+  (async () => {
+    try {
+      S.review = await api('GET', '/api/review/' + encodeURIComponent(id));
+    } catch (e) { showError(e); return; }
+    document.title = S.review.title + ' · Tour';
+    S.renderToken = 0;
+    els.loc = h('span', { class: 'loc' });
+    els.pos = h('span', { class: 'pos' });
+    els.modeEl = h('span', { class: 'mode' });
+    els.code = h('div', { class: 'walk-code' });
+    els.note = h('div', { class: 'walk-note' });
+    app.append(h('div', { class: 'walk' },
+      h('div', { class: 'walk-head' },
+        h('span', { class: 'title' }, S.review.title || id), els.loc, els.modeEl, els.pos,
+        h('span', { class: 'muted', style: 'font-size:12px' }, h('kbd', null, '?'), ' keys')),
+      h('div', { class: 'walk-body' }, els.code, els.note)));
+    S.i = Math.max(0, Math.min(stops().length - 1, startIndex || 0));
+    renderAll();
+  })();
+
+  return { onKey, destroy: hideOverlays };
+}
+
+route();
+</script>
+</body>
+</html>
