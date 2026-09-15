@@ -185,7 +185,7 @@ table.diff tr.editor-row td { padding: 8px 12px; background: var(--chrome); bord
 .walk-body { display: grid; grid-template-columns: 1fr 400px; min-height: 0; }
 .walk-code { overflow: auto; padding: 12px 0; font-family: var(--mono); line-height: 1.5; background: var(--bg); }
 .walk-code .ln { display: flex; white-space: pre-wrap; word-break: break-all; padding: 0 16px 0 0; }
-.walk-code .ln .no { width: 5ch; flex: none; text-align: right; padding-right: 1.5ch; color: var(--gut-fg); user-select: none; }
+.walk-code .ln .no { min-width: 6ch; flex: none; text-align: right; padding: 0 1.5ch 0 .5ch; color: var(--gut-fg); user-select: none; white-space: nowrap; }
 .walk-code .ln .tag { width: 1.5ch; flex: none; color: var(--muted); user-select: none; }
 .walk-code .ln.dim { opacity: .45; }
 .walk-code.full .ln.dim { opacity: .8; }
@@ -615,7 +615,7 @@ function route() {
   if (current && current.destroy) current.destroy();
   current = null;
   app.innerHTML = '';
-  document.querySelectorAll('.overlay, .goto').forEach(el => el.remove());
+  document.querySelectorAll('.overlay, .goto, .toast').forEach(el => el.remove());
   const hash = location.hash.replace(/^#/, '');
   const m = /^(author|walk|present)\/([^/]+)(?:\/(\d+))?$/.exec(hash);
   if (!m) { current = homeView(); return; }
@@ -1306,6 +1306,8 @@ function walkView(id, startIndex, presenter) {
 
   // Preprocessed text for the stop's lines (C only), keyed by original line numbers.
   async function renderExpandCode(st) {
+    els.code.innerHTML = '';
+    els.code.append(h('div', { class: 'gap' }, 'preprocessing ' + st.file + '…'));
     const r = await api('GET', '/api/expand?file=' + encodeURIComponent(st.file) + '&start=' + st.start + '&end=' + st.end);
     const frag = document.createDocumentFragment();
     frag.append(h('div', { class: 'hunk' }, 'macros expanded with ' + r.target + "'s flags"));

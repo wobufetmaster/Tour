@@ -86,6 +86,7 @@ POLYGLOT_FILES = {
 
 #define VERSION 3
 #define DEFINE_HANDLER(name) int name##_handler(int x) { return handle(x) + 1; }
+#define DECLARE_STAT(name) int name##_count = 0;
 
 int handle(int x);
 int common_util(int x);
@@ -120,6 +121,7 @@ int handle(int x)
 }
 
 DEFINE_HANDLER(status)
+DECLARE_STAT(ctl);
 
 int main(void)
 {
@@ -130,6 +132,13 @@ int main(void)
 int ctl_only(void)
 {
     return 8;
+}
+""",
+    "src/ctl/alt_handle.c": """\
+/* Alternative implementation, not in the build (compare platform/*.c in drivers). */
+int handle(int x)
+{
+    return -x;
 }
 """,
     "src/daemon/daemon.c": """\

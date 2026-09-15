@@ -9,6 +9,7 @@ in index.html next to it.
 
 import argparse
 import ast
+import concurrent.futures
 import datetime
 import json
 import os
@@ -543,6 +544,7 @@ JS_EXTS = (".js", ".mjs", ".cjs")
 PREPROCESS_TIMEOUT = 60
 MARKER_RE = re.compile(r'^# (\d+) "([^"]*)"((?: \d+)*)')
 
+INDEX_SCHEMA_VERSION = "2"  # bump when the tables change: older index files then rebuild themselves
 INDEX_SCHEMA = """
 CREATE TABLE symbols (
     name TEXT NOT NULL, kind TEXT NOT NULL, file TEXT NOT NULL, line INTEGER NOT NULL,
@@ -552,6 +554,7 @@ CREATE TABLE symbols (
 CREATE INDEX symbols_name ON symbols(name);
 CREATE TABLE binary_symbols (target TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL);
 CREATE INDEX binary_symbols_name ON binary_symbols(name);
+CREATE TABLE compiled_files (target TEXT NOT NULL, file TEXT NOT NULL);
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
@@ -772,6 +775,30 @@ def _strip_compile_args(argv, tu):
     return keep
 
 
+def compiled_files(repo, target):
+    """Repo-relative translation units listed in the target's compile database, if it has one."""
+    cc_rel = target.get("compile_commands")
+    if not cc_rel:
+        return None
+    try:
+        with open(repo_path(repo, cc_rel), encoding="utf-8") as f:
+            entries = json.load(f)
+    except (OSError, ValueError, TourError):
+        return None
+    out = set()
+    root = os.path.realpath(repo)
+    for e in entries:
+        if not isinstance(e, dict) or not e.get("file"):
+            continue
+        directory = e.get("directory") or repo
+        if not os.path.isdir(directory):
+            directory = repo
+        rel = rel_in_repo(e["file"], directory, root)
+        if rel:
+            out.add(rel)
+    return out
+
+
 def compile_flags(repo, target, tu, cc_cache=None):
     """(compiler argv0, flags, cwd) for one translation unit.
 
@@ -780,9 +807,7 @@ def compile_flags(repo, target, tu, cc_cache=None):
     cc_rel = target.get("compile_commands")
     if cc_rel:
         cc_abs = repo_path(repo, cc_rel)
-        entries = None
-        if cc_cache is not None:
-            entries = cc_cache.get(cc_abs)
+        entries = cc_cache.get(cc_abs) if cc_cache is not None else None
         if entries is None:
             try:
                 with open(cc_abs, encoding="utf-8") as f:
@@ -790,7 +815,7 @@ def compile_flags(repo, target, tu, cc_cache=None):
             except (OSError, ValueError) as e:
                 raise TourError("%s: %s" % (cc_rel, e), 500)
             if cc_cache is not None:
-                cc_cache[cc_abs] = entries
+                cc_cache[cc_abs] = entries  # a plain dict assignment is atomic enough for a worker pool
         want = os.path.realpath(os.path.join(repo, tu))
         for e in entries:
             if not isinstance(e, dict) or not e.get("file"):
@@ -855,11 +880,14 @@ def rel_in_repo(path, cwd, repo):
     return os.path.relpath(abs_path, root).replace(os.sep, "/")
 
 
-def index_macros(repo, target, target_name, tu, basic_keys, macro_names, cc_cache=None):
+def index_macros(repo, target, target_name, tu, basic_keys, cc_cache=None):
     """Symbols that only exist after preprocessing (e.g. DEFINE_HANDLER(foo) -> foo_handler).
 
-    Returns (rows, drop) where drop lists (file, line) of basic-pass tags that were
-    really macro invocations misread as definitions.
+    Returns (rows, seen): `seen` maps each (file, line) where macro-generated
+    symbols were found to the set of names the preprocessed pass saw there.
+    A basic-pass tag at such a line whose name is not in that set was a macro
+    invocation misread by ctags as a definition (module_param(...) becomes a
+    "prototype" named module_param, DEFINE_HANDLER(x) a "function").
     """
     text, cwd = preprocess(repo, target, tu, cc_cache)
     mapping = parse_line_markers(text)
@@ -874,8 +902,11 @@ def index_macros(repo, target, target_name, tu, basic_keys, macro_names, cc_cach
             os.unlink(tmp)
         except OSError:
             pass
-    rows, drop = [], set()
+    rows = []
+    seen_at = {}      # (file, line) -> names the preprocessed pass saw there
+    generated_at = set()
     source_lines = {}
+    rel_cache = {}    # a kernel unit yields tens of thousands of header tags; resolve each file once
     for name, kind, _path, line, _t, scope, static, sig in parse_ctags_json(out, target_name):
         idx = line - 1
         if idx < 0 or idx >= len(mapping) or mapping[idx] is None:
@@ -883,9 +914,12 @@ def index_macros(repo, target, target_name, tu, basic_keys, macro_names, cc_cach
         src_file, src_line, is_sys = mapping[idx]
         if is_sys:
             continue
-        rel = rel_in_repo(src_file, cwd, repo)
+        if src_file not in rel_cache:
+            rel_cache[src_file] = rel_in_repo(src_file, cwd, repo)
+        rel = rel_cache[src_file]
         if not rel:
             continue
+        seen_at.setdefault((rel, src_line), set()).add(name)
         if (rel, src_line, name) in basic_keys:
             continue  # ctags already saw this one in the source itself
         if _line_has_word(repo, rel, src_line, name, source_lines):
@@ -894,9 +928,8 @@ def index_macros(repo, target, target_name, tu, basic_keys, macro_names, cc_cach
             rows.append((name, kind, rel, src_line, target_name, scope, static, sig))
             continue
         rows.append((name, "macro-generated", rel, src_line, target_name, kind, static, sig))
-        if kind in ("function", "variable", "prototype"):
-            drop.add((rel, src_line))
-    return rows, drop
+        generated_at.add((rel, src_line))
+    return rows, {key: seen_at[key] for key in generated_at}
 
 
 def _line_has_word(repo, rel, line, word, cache):
@@ -920,13 +953,14 @@ def index_stale(repo, cfg):
         return True
     try:
         db = sqlite3.connect(path)
+        schema = db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()
         row = db.execute("SELECT value FROM meta WHERE key='built_at'").fetchone()
         count = db.execute("SELECT value FROM meta WHERE key='file_count'").fetchone()
         db.close()
     except sqlite3.Error:
         return True
-    if not row:
-        return True
+    if not row or not schema or schema[0] != INDEX_SCHEMA_VERSION:
+        return True  # missing, or built by an older Tour
     built_at = float(row[0])
     files = repo_files(repo)
     if count and int(count[0]) != len(files):
@@ -1020,32 +1054,63 @@ def build_index(repo, cfg, progress=None):
             except TourError as e:
                 errors.append("nm %s: %s" % (name, e))
 
-        # Macro-generated definitions: preprocess each translation unit.
+        # Which translation units each target's compile database really builds
+        # (a driver with twelve platform/*.c files compiles one of them).
+        built_by_target = {}
+        for name, t in targets.items():
+            built = compiled_files(repo, t)
+            if built:
+                built_by_target[name] = built
+                db.executemany("INSERT INTO compiled_files VALUES (?, ?)", [(name, f) for f in sorted(built)])
+
+        # Macro-generated definitions: preprocess each translation unit.  This is the
+        # slow part on real projects (kernel headers take seconds per unit), so units
+        # run in parallel, and a target with a compile database only preprocesses the
+        # units that database builds.
         if have_ctags:
             basic_keys = set((r[2], r[3], r[0]) for r in rows)
-            macro_names = set(r[0] for r in rows if r[1] == "macro")
             cc_cache = {}
             seen = set()
-            drop_all = set()
+            seen_at = {}
+            jobs = []
             for name, t in targets.items():
+                built = built_by_target.get(name)
                 for tu in c_tus.get(name, []):
-                    note("preprocess: %s (%s)" % (tu, name))
-                    try:
-                        extra, drop = index_macros(repo, t, name, tu, basic_keys, macro_names, cc_cache)
-                    except TourError as e:
-                        errors.append("%s (%s): %s" % (tu, name, str(e).splitlines()[0][:300]))
+                    if built is not None and tu not in built:
                         continue
+                    jobs.append((name, t, tu))
+            done = [0]
+
+            def work(job):
+                name, t, tu = job
+                try:
+                    return job, index_macros(repo, t, name, tu, basic_keys, cc_cache), None
+                except TourError as e:
+                    return job, None, str(e).splitlines()[0][:300]
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(8, os.cpu_count() or 1))) as pool:
+                for (name, t, tu), result, err in pool.map(work, jobs):
+                    done[0] += 1
+                    note("preprocess: %s (%s) %d/%d" % (tu, name, done[0], len(jobs)))
+                    if err:
+                        errors.append("%s (%s): %s" % (tu, name, err))
+                        continue
+                    extra, at = result
                     for r in extra:
                         key = (r[0], r[2], r[3], r[4])
                         if key not in seen:
                             seen.add(key)
                             rows.append(r)
-                    drop_all |= drop
-            if drop_all:
-                rows = [r for r in rows if not (r[1] == "function" and r[0] in macro_names and (r[2], r[3]) in drop_all)]
+                    for key, names in at.items():
+                        seen_at.setdefault(key, set()).update(names)
+            if seen_at:
+                # Macro invocations that ctags took for definitions.
+                misparse_kinds = ("function", "prototype", "variable")
+                rows = [r for r in rows if not (r[1] in misparse_kinds and (r[2], r[3]) in seen_at and r[0] not in seen_at[(r[2], r[3])])]
 
         db.executemany("INSERT INTO symbols VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
         meta = {
+            "schema": INDEX_SCHEMA_VERSION,
             "built_at": repr(time.time()),
             "file_count": str(len(files)),
             "duration": "%.2f" % (time.time() - started),
@@ -1067,10 +1132,16 @@ def index_status(repo, cfg):
     db = sqlite3.connect(path)
     try:
         meta = dict(db.execute("SELECT key, value FROM meta").fetchall())
+        if meta.get("schema") != INDEX_SCHEMA_VERSION:
+            raise sqlite3.OperationalError("schema")
         total = db.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
         by_target = dict(db.execute("SELECT target, COUNT(*) FROM symbols GROUP BY target").fetchall())
         by_kind = dict(db.execute("SELECT kind, COUNT(*) FROM symbols GROUP BY kind").fetchall())
         binaries = dict(db.execute("SELECT target, COUNT(*) FROM binary_symbols GROUP BY target").fetchall())
+        compiled = dict(db.execute("SELECT target, COUNT(*) FROM compiled_files GROUP BY target").fetchall())
+    except sqlite3.Error:
+        return {"exists": False, "symbols": 0, "by_target": {}, "by_kind": {}, "built_at": None,
+                "errors": ["the symbol index was built by an older version of Tour: rebuild it"]}
     finally:
         db.close()
     built = float(meta.get("built_at", 0) or 0)
@@ -1080,6 +1151,7 @@ def index_status(repo, cfg):
         "by_target": by_target,
         "by_kind": by_kind,
         "binaries": binaries,
+        "compiled": compiled,
         "errors": json.loads(meta.get("errors", "[]")),
         "built_at": datetime.datetime.fromtimestamp(built).replace(microsecond=0).isoformat() if built else None,
         "duration": float(meta.get("duration", 0) or 0),
@@ -1109,6 +1181,11 @@ def lookup_symbol(repo, cfg, name, target=None, file=None):
     try:
         rows = db.execute("SELECT name, kind, file, line, target, scope, static, signature FROM symbols WHERE name=?", (name,)).fetchall()
         in_bin = set(r[0] for r in db.execute("SELECT target FROM binary_symbols WHERE name=?", (name,)).fetchall())
+        built = {}
+        for t, f in db.execute("SELECT target, file FROM compiled_files").fetchall():
+            built.setdefault(t, set()).add(f)
+    except sqlite3.Error:
+        raise TourError("symbol index needs rebuilding (built by an older version of Tour)", 404)
     finally:
         db.close()
     extends = {(f, line): scope for n, kind, f, line, t, scope, static, sig in rows if kind == "extends"}
@@ -1127,6 +1204,15 @@ def lookup_symbol(repo, cfg, name, target=None, file=None):
             score -= 30
         if f == file:
             score += 5
+        if t in built and f.endswith(C_TU_EXTS):
+            # A .c file the target's compile database never builds is probably dead for it
+            # (drivers with one platform/*.c per board).  The bonus for a built file only
+            # counts for the target being asked about, so a target without a database
+            # is not out-ranked merely for lacking one.
+            if f not in built[t]:
+                score -= 15
+            elif t == target:
+                score += 15
         key = (kind, f, line, scope)
         d = merged.get(key)
         if d is None:
@@ -1145,6 +1231,30 @@ def lookup_symbol(repo, cfg, name, target=None, file=None):
     if len(defs) == 1 or (len(defs) > 1 and defs[0]["score"] > defs[1]["score"]):
         preferred = 0
     return {"name": name, "target": target, "definitions": defs, "preferred": preferred}
+
+
+EXPAND_CACHE = {}
+EXPAND_CACHE_MAX = 8
+EXPAND_LOCK = threading.Lock()
+
+
+def preprocess_cached(repo, target, target_name, tu):
+    """preprocess() with a small in-memory cache: a second `m` on the same file is instant."""
+    try:
+        mtime = os.stat(os.path.join(repo, tu)).st_mtime
+    except OSError:
+        mtime = 0
+    key = (repo, target_name, tu, mtime)
+    with EXPAND_LOCK:
+        hit = EXPAND_CACHE.get(key)
+    if hit is not None:
+        return hit
+    result = preprocess(repo, target, tu)
+    with EXPAND_LOCK:
+        if len(EXPAND_CACHE) >= EXPAND_CACHE_MAX:
+            EXPAND_CACHE.pop(next(iter(EXPAND_CACHE)))
+        EXPAND_CACHE[key] = result
+    return result
 
 
 def expand_range(repo, cfg, file, start, end, target=None):
@@ -1176,14 +1286,17 @@ def expand_range(repo, cfg, file, start, end, target=None):
                             break
                 except OSError:
                     continue
-    text, cwd = preprocess(repo, targets[target], tu)
+    text, cwd = preprocess_cached(repo, targets[target], target, tu)
     mapping = parse_line_markers(text)
     lines = text.split("\n")
     out = []
+    rel_cache = {}
     for i, m in enumerate(mapping):
-        if m is None or m[2]:
+        if m is None or m[2] or not (start <= m[1] <= end):
             continue
-        if rel_in_repo(m[0], cwd, repo) == rel and start <= m[1] <= end:
+        if m[0] not in rel_cache:
+            rel_cache[m[0]] = rel_in_repo(m[0], cwd, repo)
+        if rel_cache[m[0]] == rel:
             out.append({"line": m[1], "text": lines[i]})
     return {"file": rel, "target": target, "start": start, "end": end, "lines": out}
 

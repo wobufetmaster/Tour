@@ -98,7 +98,8 @@ class PolyglotIndexTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.fx = PolyglotRepo()
-        cls.status = tour.build_index(cls.fx.repo, cls.fx.cfg)
+        cls.progress = []
+        cls.status = tour.build_index(cls.fx.repo, cls.fx.cfg, cls.progress.append)
 
     @classmethod
     def tearDownClass(cls):
@@ -114,8 +115,14 @@ class PolyglotIndexTest(unittest.TestCase):
         self.assertEqual(set(st["by_target"]), {"", "flightctl", "flightd"})
         self.assertGreater(st["binaries"]["flightctl"], 0)
         self.assertGreater(st["binaries"]["flightd"], 0)
-        self.assertEqual(st["by_kind"]["macro-generated"], 2)  # status_handler, reload_handler
+        self.assertEqual(st["by_kind"]["macro-generated"], 3)  # status_handler, reload_handler, ctl_count
         self.assertTrue(os.path.exists(os.path.join(self.fx.repo, ".tours", ".gitignore")))
+        # flightctl has a compile database: only the units it builds are preprocessed for it.
+        pp = [m for m in self.progress if m.startswith("preprocess:")]
+        self.assertTrue(any("src/ctl/ctl.c (flightctl)" in m for m in pp))
+        self.assertFalse(any("alt_handle.c" in m for m in pp))
+        # flightd has cflags only: every unit in its sources is preprocessed.
+        self.assertTrue(any("src/daemon/only_daemon.c (flightd)" in m for m in pp))
         self.assertFalse(tour.index_stale(self.fx.repo, self.fx.cfg))
 
     def test_same_name_resolves_per_target(self):
@@ -127,11 +134,16 @@ class PolyglotIndexTest(unittest.TestCase):
         self.assertEqual(d["definitions"][0]["file"], "src/daemon/daemon.c")
         # Target inferred from the file the click came from.
         self.assertEqual(self.look("handle", file="src/daemon/daemon.c")["definitions"][0]["file"], "src/daemon/daemon.c")
-        # Without any context both definitions tie: the UI must ask.
+        # Without any context both real definitions tie: the UI must ask.
         both = self.look("handle")
         self.assertIsNone(both["preferred"])
         self.assertEqual([x["file"] for x in both["definitions"][:2]], ["src/ctl/ctl.c", "src/daemon/daemon.c"])
-        self.assertEqual(both["definitions"][2]["kind"], "prototype")
+        # src/ctl/alt_handle.c matches flightctl's sources but its compile database never builds it,
+        # so it sinks below the compiled definition.
+        files = [x["file"] for x in both["definitions"]]
+        self.assertLess(files.index("src/ctl/ctl.c"), files.index("src/ctl/alt_handle.c"))
+        self.assertEqual(ctl["definitions"][0]["file"], "src/ctl/ctl.c")
+        self.assertEqual(self.status["compiled"], {"flightctl": 3})  # flightd has cflags only
 
     def test_static_symbols_resolve_by_file(self):
         r = self.look("helper", file="src/ctl/ctl.c")
@@ -167,6 +179,12 @@ class PolyglotIndexTest(unittest.TestCase):
         # The macro invocation line is not also reported as a function called DEFINE_HANDLER.
         kinds = set(d["kind"] for d in self.look("DEFINE_HANDLER")["definitions"])
         self.assertEqual(kinds, {"macro"})
+        # `DECLARE_STAT(ctl);` at file scope looks like a K&R prototype to ctags (as module_param does
+        # in kernel modules); the preprocessed pass knows better.
+        self.assertEqual(set(d["kind"] for d in self.look("DECLARE_STAT")["definitions"]), {"macro"})
+        stat = self.look("ctl_count")["definitions"]
+        self.assertEqual([(d["kind"], d["file"], d["line"], d["scope"]) for d in stat],
+                         [("macro-generated", "src/ctl/ctl.c", 15, "variable")])
         # Nothing from system headers leaked in.
         self.assertEqual(self.look("printf")["definitions"], [])
         # ctags misses `main` after the macro invocation; the preprocessed pass recovers it as a plain function.
@@ -212,6 +230,28 @@ class PolyglotIndexTest(unittest.TestCase):
             tour.expand_range(self.fx.repo, self.fx.cfg, "tools/report.py", 1, 2)
         with self.assertRaises(tour.TourError):
             tour.expand_range(self.fx.repo, self.fx.cfg, "src/ctl/ctl.c", 1, 2, target="nope")
+
+    def test_index_from_older_version_is_stale_not_fatal(self):
+        import sqlite3
+        path = tour.index_path(self.fx.repo, self.fx.cfg)
+        backup = path + ".bak"
+        os.replace(path, backup)
+        try:
+            db = sqlite3.connect(path)
+            db.executescript("CREATE TABLE symbols (name TEXT, kind TEXT, file TEXT, line INTEGER, target TEXT, scope TEXT);"
+                             "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);")
+            db.execute("INSERT INTO meta VALUES ('built_at', ?)", (repr(time.time() + 100),))
+            db.execute("INSERT INTO meta VALUES ('file_count', ?)", (str(len(tour.repo_files(self.fx.repo))),))
+            db.commit()
+            db.close()
+            self.assertTrue(tour.index_stale(self.fx.repo, self.fx.cfg))
+            st = tour.index_status(self.fx.repo, self.fx.cfg)
+            self.assertFalse(st["exists"])
+            self.assertTrue(any("older version" in e for e in st["errors"]))
+            with self.assertRaises(tour.TourError):
+                self.look("handle")
+        finally:
+            os.replace(backup, path)
 
     def test_stale_after_edit_and_missing_ctags(self):
         path = os.path.join(self.fx.repo, "src/ctl/only_ctl.c")
