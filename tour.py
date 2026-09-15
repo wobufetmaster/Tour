@@ -16,6 +16,8 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
@@ -34,6 +36,7 @@ DEFAULT_CONFIG = {
 
 REVIEW_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 STOP_KINDS = ("change", "context", "question")
+VIEW_MODES = ("stop", "full", "diff")
 
 
 class TourError(Exception):
@@ -523,6 +526,61 @@ def default_base(repo, head, branch_names):
 
 
 # ---------------------------------------------------------------------------
+# Presenter state (v2).  Lives in memory: it only matters while a talk is on.
+# ---------------------------------------------------------------------------
+
+
+class PresenterState:
+    """Where the presenter is.  The projector tab polls this and follows."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.review_id = None
+        self.stop_index = 0
+        self.mode = "stop"
+        self.updated = 0.0      # last presenter PUT
+        self.last_follow = 0.0  # last projector poll
+        self.review_version = 0  # bumped on every review save or flag, so open tabs refetch
+
+    def snapshot(self, now=None):
+        now = time.time() if now is None else now
+        return {
+            "review_id": self.review_id,
+            "stop_index": self.stop_index,
+            "mode": self.mode,
+            "age": round(now - self.updated, 3) if self.updated else None,
+            "projector_age": round(now - self.last_follow, 3) if self.last_follow else None,
+            "review_version": self.review_version,
+        }
+
+    def bump(self):
+        with self.lock:
+            self.review_version += 1
+
+    def get(self, follow=False):
+        with self.lock:
+            now = time.time()
+            if follow:
+                self.last_follow = now
+            return self.snapshot(now)
+
+    def put(self, body):
+        if not isinstance(body, dict):
+            raise TourError("state must be an object")
+        review_id = check_review_id(body.get("review_id"))
+        stop_index = body.get("stop_index", 0)
+        if not isinstance(stop_index, int) or stop_index < 0:
+            raise TourError("stop_index must be a non-negative integer")
+        mode = body.get("mode", "stop")
+        if mode not in VIEW_MODES:
+            raise TourError("mode must be one of %s" % ", ".join(VIEW_MODES))
+        with self.lock:
+            self.review_id, self.stop_index, self.mode = review_id, stop_index, mode
+            self.updated = time.time()
+            return self.snapshot(self.updated)
+
+
+# ---------------------------------------------------------------------------
 # HTTP
 # ---------------------------------------------------------------------------
 
@@ -536,6 +594,8 @@ ROUTES = [
     ("GET", re.compile(r"^/api/diff$"), "api_diff"),
     ("GET", re.compile(r"^/api/file$"), "api_file"),
     ("GET", re.compile(r"^/api/refs$"), "api_refs"),
+    ("GET", re.compile(r"^/api/state$"), "api_state_get"),
+    ("PUT", re.compile(r"^/api/state$"), "api_state_put"),
 ]
 
 
@@ -640,12 +700,16 @@ class Handler(BaseHTTPRequestHandler):
         return load_review(self.repo, self.cfg, unquote(m.group(1)))
 
     def api_review_put(self, m, q):
-        return save_review(self.repo, self.cfg, unquote(m.group(1)), self.read_json())
+        review = save_review(self.repo, self.cfg, unquote(m.group(1)), self.read_json())
+        self.server.state.bump()
+        return review
 
     def api_review_flag(self, m, q):
         body = self.read_json()
         by = body.get("by") or default_author(self.repo)
-        return add_flag(self.repo, self.cfg, unquote(m.group(1)), body.get("stop_id"), body.get("text"), by)
+        review = add_flag(self.repo, self.cfg, unquote(m.group(1)), body.get("stop_id"), body.get("text"), by)
+        self.server.state.bump()
+        return review
 
     def api_draft(self, m, q):
         body = self.read_json()
@@ -662,6 +726,12 @@ class Handler(BaseHTTPRequestHandler):
     def api_refs(self, m, q):
         return git_refs(self.repo)
 
+    def api_state_get(self, m, q):
+        return self.server.state.get(follow=q.get("follow") in ("1", "true"))
+
+    def api_state_put(self, m, q):
+        return self.server.state.put(self.read_json())
+
 
 class TourServer(ThreadingHTTPServer):
     allow_reuse_address = True
@@ -671,6 +741,7 @@ class TourServer(ThreadingHTTPServer):
         ThreadingHTTPServer.__init__(self, address, Handler)
         self.repo = repo
         self.verbose = verbose
+        self.state = PresenterState()
 
 
 def main(argv=None):

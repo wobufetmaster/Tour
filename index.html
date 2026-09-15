@@ -190,7 +190,16 @@ table.diff tr.editor-row td { padding: 8px 12px; background: var(--chrome); bord
 .walk-note .flags { margin-top: 20px; border-top: 1px dashed var(--border); padding-top: 10px; font-size: 14px; }
 .walk-note .flags li { margin: 4px 0; }
 .walk-note .empty { color: var(--muted); font-style: italic; }
+.walk-body.present { grid-template-columns: 260px 1fr 420px; }
+.walk-body.present .stop-list { font-size: 13px; }
+.walk-body.present .stop-list li { grid-template-columns: 12px 1fr; }
+.walk-note h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 18px 0 6px; font-weight: 600; }
+.walk-note .private { border-top: 1px dashed var(--border); margin-top: 16px; font-size: 15px; }
+.walk-note .upnext { font-size: 14px; }
+.statusbar .live { color: #7ee787; }
 @media (max-width: 1000px) {
+  .walk-body.present { grid-template-columns: 1fr; }
+  .walk-body.present .sidebar { display: none; }
   .walk-body { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
   .walk-note { border-left: 0; border-top: 1px solid var(--border); max-height: 40vh; }
   .ide-body { grid-template-columns: 200px 1fr 300px; }
@@ -469,10 +478,11 @@ function route() {
   app.innerHTML = '';
   document.querySelectorAll('.overlay, .goto').forEach(el => el.remove());
   const hash = location.hash.replace(/^#/, '');
-  const m = /^(author|walk)\/([^/]+)(?:\/(\d+))?$/.exec(hash);
+  const m = /^(author|walk|present)\/([^/]+)(?:\/(\d+))?$/.exec(hash);
   if (!m) { current = homeView(); return; }
   const id = decodeURIComponent(m[2]);
-  current = m[1] === 'author' ? authorView(id) : walkView(id, m[3] ? parseInt(m[3], 10) - 1 : 0);
+  const idx = m[3] ? parseInt(m[3], 10) - 1 : 0;
+  current = m[1] === 'author' ? authorView(id) : walkView(id, idx, m[1] === 'present');
 }
 
 function showError(err) {
@@ -499,8 +509,9 @@ function homeView() {
           h('span', { class: 'muted' }, r.stops + (r.stops === 1 ? ' stop' : ' stops')),
           h('span', { class: 'muted' }, r.author),
           h('span', { class: 'muted' }, (r.created || '').replace('T', ' ').slice(0, 16)),
-          h('a', { href: '#walk/' + encodeURIComponent(r.id) }, 'walk'),
-          h('a', { href: '#author/' + encodeURIComponent(r.id) }, 'edit'))))
+          h('a', { href: '#author/' + encodeURIComponent(r.id) }, 'edit'),
+          h('a', { href: '#present/' + encodeURIComponent(r.id) }, 'present'),
+          h('a', { href: '#walk/' + encodeURIComponent(r.id) }, 'walk'))))
       : h('p', { class: 'muted' }, 'No reviews yet. Create one below; it is saved as ', h('code', null, cfg.tours_dir + '/<id>.json'), ' in the repo.');
 
     let form;
@@ -883,7 +894,8 @@ function authorView(id) {
         h('span', { class: 'muted sha' }, short(r.base) + ' → ' + short(r.head)),
         h('span', { class: 'grow' }),
         themeBtn(),
-        h('a', { href: '#walk/' + encodeURIComponent(id), target: '_blank' }, h('button', { class: 'primary small' }, '▶ Walk'))),
+        h('a', { href: '#present/' + encodeURIComponent(id), target: '_blank' }, h('button', { class: 'primary small' }, '🎤 Present')),
+        h('a', { href: '#walk/' + encodeURIComponent(id), target: '_blank' }, h('button', { class: 'small' }, '▶ Walk'))),
       h('div', { class: 'ide-body' },
         h('div', { class: 'sidebar' }, h('h3', null, 'Changes (' + S.files.length + ')'), els.files),
         h('div', { class: 'editor' },
@@ -965,13 +977,18 @@ function authorView(id) {
 }
 
 /* =========================================================================
- * Walkthrough: the projector view
+ * Walkthrough (projector) and presenter tab.  One view, two flavours:
+ *   #walk/<id>     projector: minimal chrome, follows the presenter when one is live
+ *   #present/<id>  presenter: stop list, private notes, up-next; pushes state
  * ========================================================================= */
 
-function walkView(id, startIndex) {
+const VIEW_MODES = ['stop', 'full', 'diff'];
+
+function walkView(id, startIndex, presenter) {
   const S = {
-    review: null, i: 0, mode: 'stop', files: new Map(), diff: null, goto: null, help: false,
-    font: parseInt(localStorage.getItem('tour.font'), 10) || 18, err: null,
+    review: null, i: 0, mode: 'stop', files: new Map(), diff: null, goto: null, help: false, flag: null,
+    font: parseInt(localStorage.getItem('tour.font'), 10) || 18, renderToken: 0,
+    following: false, projector: false, lastApplied: '', pollTimer: null, beatTimer: null,
   };
   const els = {};
   const CONTEXT = 8;
@@ -979,6 +996,7 @@ function walkView(id, startIndex) {
   const stops = () => S.review.stops || [];
   const cur = () => stops()[S.i];
   const revFor = st => (st.side === 'base' ? S.review.base : S.review.head);
+  const locOf = st => st.file + ':' + st.start + (st.end !== st.start ? '-' + st.end : '') + (st.side === 'base' ? ' (base)' : '');
 
   async function getFile(path, rev) {
     const key = rev + ':' + path;
@@ -993,6 +1011,54 @@ function walkView(id, startIndex) {
     return S.diff;
   }
 
+  /* ----- presenter <-> projector sync ----- */
+  async function pushState() {
+    if (!presenter || !S.review) return;
+    try {
+      const st = await api('PUT', '/api/state', { review_id: id, stop_index: S.i, mode: S.mode });
+      setProjector(st.projector_age != null && st.projector_age < 3);
+      checkReviewVersion(st);
+    } catch (e) { setProjector(false); }
+  }
+  // Someone saved or flagged the review (maybe in another tab): reload it so notes and flags stay current.
+  async function checkReviewVersion(st) {
+    if (S.reviewVersion === undefined) { S.reviewVersion = st.review_version; return; }
+    if (st.review_version === S.reviewVersion) return;
+    S.reviewVersion = st.review_version;
+    try {
+      S.review = await api('GET', '/api/review/' + encodeURIComponent(id));
+      S.i = Math.max(0, Math.min(stops().length - 1, S.i));
+      renderHead(); renderNote(); renderStops();
+    } catch (e) { /* keep what we have */ }
+  }
+  async function poll() {
+    if (!S.review) return;
+    let st;
+    try { st = await api('GET', '/api/state?follow=1'); } catch (e) { setFollowing(false); return; }
+    checkReviewVersion(st);
+    const live = st.review_id === id && st.age != null && st.age < 6;
+    setFollowing(live);
+    if (!live) { S.lastApplied = ''; return; }
+    const key = st.stop_index + ':' + st.mode;
+    if (key === S.lastApplied) return;
+    S.lastApplied = key;
+    S.mode = VIEW_MODES.includes(st.mode) ? st.mode : 'stop';
+    go(st.stop_index, { keepMode: true, silent: true });
+  }
+  function setFollowing(on) {
+    if (on === S.following) return;
+    S.following = on;
+    els.sync.textContent = on ? '● following presenter' : '○ standalone';
+    els.sync.className = on ? 'live' : '';
+  }
+  function setProjector(on) {
+    if (on === S.projector) return;
+    S.projector = on;
+    els.sync.textContent = on ? '● projector following' : '○ no projector yet';
+    els.sync.className = on ? 'live' : '';
+  }
+
+  /* ----- rendering ----- */
   function lineEl(no, html, cls, tag) {
     return h('div', { class: 'ln ' + cls }, h('span', { class: 'no' }, no || ''), tag !== undefined ? h('span', { class: 'tag' }, tag) : null, h('span', { class: 'src', html }));
   }
@@ -1075,28 +1141,59 @@ function walkView(id, startIndex) {
     els.note.append(h('div', null, h('span', { class: 'badge ' + (st.kind || 'change') }, st.kind || 'change')));
     if (st.note && st.note.trim()) els.note.append(h('div', { html: md(st.note) }));
     else els.note.append(h('p', { class: 'empty' }, 'No note for this stop.'));
-    if (st.flags && st.flags.length) {
-      els.note.append(h('div', { class: 'flags' }, h('b', null, 'Flags'), h('ul', null, st.flags.map(f => h('li', null, f.text, ' ', h('span', { class: 'muted' }, '— ' + f.by))))));
+    if (presenter) {
+      els.note.append(h('div', { class: 'private' },
+        h('h3', null, 'Presenter note ', h('span', { class: 'badge question' }, 'private')),
+        st.presenter_note && st.presenter_note.trim() ? h('div', { html: md(st.presenter_note) }) : h('p', { class: 'empty' }, 'None.')));
+      const next = stops()[S.i + 1];
+      els.note.append(h('div', { class: 'upnext' },
+        h('h3', null, 'Up next'),
+        next ? h('div', null, h('span', { class: 'mono' }, (S.i + 2) + '. ' + locOf(next)), h('div', { class: 'muted' }, firstLine(next.note) || 'no note'))
+             : h('div', { class: 'muted' }, 'This is the last stop.')));
     }
+    if (st.flags && st.flags.length) {
+      els.note.append(h('div', { class: 'flags' }, h('h3', null, 'Flags'), h('ul', null, st.flags.map(f => h('li', null, f.text, ' ', h('span', { class: 'muted' }, '— ' + f.by))))));
+    }
+  }
+
+  function renderStops() {
+    if (!presenter) return;
+    els.stops.innerHTML = '';
+    stops().forEach((st, i) => {
+      els.stops.append(h('li', { class: i === S.i ? 'active' : '', onclick: () => go(i) },
+        h('span', { class: 'grip' }, i === S.i ? '▸' : ''),
+        h('div', null,
+          h('div', { class: 'loc' }, h('span', { class: 'idx' }, (i + 1) + '.'), h('span', { class: 'badge ' + (st.kind || 'change') }, st.kind || 'change'),
+            h('span', { class: 'f', title: st.file }, st.file.split('/').pop() + ':' + st.start + (st.end !== st.start ? '-' + st.end : '') + (st.flags && st.flags.length ? ' ⚑' : ''))),
+          h('div', { class: 'note1' + (firstLine(st.note) ? '' : ' empty') }, firstLine(st.note) || 'no note'))));
+    });
+    const active = els.stops.querySelector('li.active');
+    if (active) active.scrollIntoView({ block: 'nearest' });
   }
 
   function renderHead() {
     const st = cur();
     const total = stops().length;
-    els.loc.textContent = st ? st.file + ':' + st.start + (st.end !== st.start ? '-' + st.end : '') + (st.side === 'base' ? ' (base)' : '') : '';
+    els.loc.textContent = st ? locOf(st) : '';
     els.pos.textContent = total ? 'stop ' + (S.i + 1) + ' / ' + total : 'no stops';
     els.modeEl.textContent = S.mode === 'full' ? 'FULL FILE · Esc returns' : S.mode === 'diff' ? 'DIFF · d returns' : (st ? (st.side === 'base' ? 'base' : 'head') : '');
   }
 
-  function renderAll() { renderHead(); renderNote(); renderCode(); }
+  function renderAll() { renderHead(); renderNote(); renderStops(); renderCode(); }
 
   function go(i, opts) {
     const total = stops().length;
     if (!total) return;
     S.i = Math.max(0, Math.min(total - 1, i));
     if (!(opts && opts.keepMode)) S.mode = 'stop';
-    history.replaceState(null, '', '#walk/' + encodeURIComponent(id) + '/' + (S.i + 1));
+    history.replaceState(null, '', '#' + (presenter ? 'present' : 'walk') + '/' + encodeURIComponent(id) + '/' + (S.i + 1));
     renderAll();
+    if (!(opts && opts.silent)) pushState();
+  }
+  function setMode(mode) {
+    S.mode = mode;
+    renderHead(); renderCode();
+    pushState();
   }
 
   function setFont(delta) {
@@ -1105,6 +1202,7 @@ function walkView(id, startIndex) {
     els.code.style.fontSize = S.font + 'px';
   }
 
+  /* ----- overlays: help, goto, flag ----- */
   function showHelp() {
     hideOverlays();
     S.help = true;
@@ -1112,15 +1210,17 @@ function walkView(id, startIndex) {
       ['Space / → / j', 'next stop'], ['← / k', 'previous stop'], ['Home / End', 'first / last stop'],
       ['g then a number, Enter', 'jump to a stop'], ['f', 'open the full file at this point'],
       ['d', 'show the diff for this stop instead of the file'], ['Esc', 'back to the current stop'],
-      ['+ / -', 'font size'], ['t', 'dark / light theme'], ['?', 'this help'],
+      ['x', 'flag this stop for follow-up'], ['+ / -', 'font size'], ['t', 'dark / light theme'], ['?', 'this help'],
     ];
     document.body.append(h('div', { class: 'overlay', onclick: hideOverlays },
-      h('div', { class: 'box' }, h('h2', null, 'Keys'),
+      h('div', { class: 'box' }, h('h2', null, presenter ? 'Presenter keys' : 'Keys'),
         h('table', null, rows.map(r => h('tr', null, h('td', null, h('kbd', null, r[0])), h('td', null, r[1])))),
-        h('p', { class: 'muted', style: 'margin:12px 0 0' }, 'Any key closes this.'))));
+        h('p', { class: 'muted', style: 'margin:12px 0 0' }, presenter
+          ? 'The projector tab (#walk) follows this tab while it is open.'
+          : 'Any key closes this.'))));
   }
   function hideOverlays() {
-    S.help = false; S.goto = null;
+    S.help = false; S.goto = null; S.flag = null;
     document.querySelectorAll('.overlay, .goto').forEach(el => el.remove());
   }
   function paintGoto() {
@@ -1129,9 +1229,40 @@ function walkView(id, startIndex) {
     if (!el) { el = h('div', { class: 'goto' }); document.body.append(el); }
     el.textContent = 'go to stop: ' + S.goto + '_   (Enter, Esc)';
   }
+  function openFlag() {
+    const st = cur();
+    if (!st) return;
+    hideOverlays();
+    S.flag = '';
+    const input = h('input', { type: 'text', placeholder: 'What needs following up?', style: 'width:100%;font-size:16px' });
+    input.addEventListener('keydown', e => {
+      e.stopPropagation();
+      if (e.key === 'Enter') submitFlag(input.value);
+      else if (e.key === 'Escape') hideOverlays();
+    });
+    document.body.append(h('div', { class: 'overlay', onclick: hideOverlays },
+      h('div', { class: 'box', onclick: e => e.stopPropagation() },
+        h('h2', null, 'Flag stop ' + (S.i + 1)),
+        h('div', { class: 'mono muted', style: 'margin-bottom:10px' }, locOf(st)),
+        input,
+        h('p', { class: 'muted', style: 'margin:10px 0 0' }, 'Enter saves it into the review file. Esc cancels.'))));
+    input.focus();
+  }
+  async function submitFlag(text) {
+    text = text.trim();
+    const st = cur();
+    hideOverlays();
+    if (!text || !st) return;
+    try {
+      S.review = await api('POST', '/api/review/' + encodeURIComponent(id) + '/flag', { stop_id: st.id, text });
+      toast('Flagged stop ' + (S.i + 1));
+    } catch (e) { toast('Flag failed: ' + e.message); }
+    renderNote(); renderStops();
+  }
 
   function onKey(e) {
     if (!S.review) return;
+    if (S.flag !== null) return;  // the flag input handles its own keys
     if (S.help) { e.preventDefault(); hideOverlays(); return; }
     if (S.goto !== null) {
       e.preventDefault();
@@ -1148,10 +1279,11 @@ function walkView(id, startIndex) {
     else if (k === 'ArrowLeft' || k === 'k' || k === 'PageUp') { e.preventDefault(); go(S.i - 1); }
     else if (k === 'Home') { e.preventDefault(); go(0); }
     else if (k === 'End') { e.preventDefault(); go(stops().length - 1); }
-    else if (k === 'f') { e.preventDefault(); S.mode = S.mode === 'full' ? 'stop' : 'full'; renderHead(); renderCode(); }
-    else if (k === 'd') { e.preventDefault(); S.mode = S.mode === 'diff' ? 'stop' : 'diff'; renderHead(); renderCode(); }
-    else if (k === 'Escape') { e.preventDefault(); S.mode = 'stop'; renderHead(); renderCode(); }
+    else if (k === 'f') { e.preventDefault(); setMode(S.mode === 'full' ? 'stop' : 'full'); }
+    else if (k === 'd') { e.preventDefault(); setMode(S.mode === 'diff' ? 'stop' : 'diff'); }
+    else if (k === 'Escape') { e.preventDefault(); setMode('stop'); }
     else if (k === 'g') { e.preventDefault(); S.goto = ''; paintGoto(); }
+    else if (k === 'x') { e.preventDefault(); openFlag(); }
     else if (k === '?') { e.preventDefault(); showHelp(); }
     else if (k === '+' || k === '=') { e.preventDefault(); setFont(1); }
     else if (k === '-' || k === '_') { e.preventDefault(); setFont(-1); }
@@ -1162,27 +1294,40 @@ function walkView(id, startIndex) {
     try {
       S.review = await api('GET', '/api/review/' + encodeURIComponent(id));
     } catch (e) { showError(e); return; }
-    document.title = S.review.title + ' · Tour';
-    S.renderToken = 0;
+    document.title = (presenter ? '🎤 ' : '') + S.review.title + ' · Tour';
     els.loc = h('span', { class: 'loc mono' });
     els.pos = h('span', { class: 'pos' });
     els.modeEl = h('span', { class: 'mode' });
+    els.sync = h('span', null, presenter ? '○ no projector yet' : '○ standalone');
     els.code = h('div', { class: 'walk-code' });
     els.note = h('div', { class: 'walk-note' });
+    els.stops = h('ul', { class: 'stop-list' });
+    const body = presenter
+      ? h('div', { class: 'walk-body present' }, h('div', { class: 'sidebar' }, h('h3', null, 'Stops'), els.stops), els.code, els.note)
+      : h('div', { class: 'walk-body' }, els.code, els.note);
     app.append(h('div', { class: 'ide walk' },
       h('div', { class: 'titlebar' },
         h('span', { class: 'brand' }, 'Tour'), h('span', { class: 'sep' }, '›'),
         h('span', { class: 'title', style: 'min-width:0' }, S.review.title || id),
-        h('span', { class: 'grow' }), themeBtn()),
-      h('div', { class: 'walk-body' }, els.code, els.note),
+        presenter ? h('span', { class: 'badge question' }, 'presenter') : null,
+        h('span', { class: 'grow' }),
+        presenter ? h('a', { href: '#walk/' + encodeURIComponent(id), target: '_blank' }, h('button', { class: 'small' }, '▶ open projector tab')) : null,
+        presenter ? h('a', { href: '#author/' + encodeURIComponent(id) }, h('button', { class: 'small ghost' }, 'edit')) : null,
+        themeBtn()),
+      body,
       h('div', { class: 'statusbar' },
-        els.loc, els.modeEl,
+        els.loc, els.modeEl, els.sync,
         h('span', { class: 'right' }, els.pos, h('span', null, h('kbd', null, '?'), ' keys')))));
     S.i = Math.max(0, Math.min(stops().length - 1, startIndex || 0));
     renderAll();
+    if (presenter) { pushState(); S.beatTimer = setInterval(pushState, 2000); }
+    else { poll(); S.pollTimer = setInterval(poll, 500); }
   })();
 
-  return { onKey, destroy: hideOverlays };
+  return {
+    onKey,
+    destroy() { hideOverlays(); clearInterval(S.pollTimer); clearInterval(S.beatTimer); },
+  };
 }
 
 route();
