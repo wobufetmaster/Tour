@@ -8,11 +8,14 @@ in index.html next to it.
 """
 
 import argparse
+import ast
 import datetime
 import json
 import os
 import posixpath
 import re
+import shlex
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -36,7 +39,7 @@ DEFAULT_CONFIG = {
 
 REVIEW_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 STOP_KINDS = ("change", "context", "question")
-VIEW_MODES = ("stop", "full", "diff")
+VIEW_MODES = ("stop", "full", "diff", "peek", "expand")
 
 
 class TourError(Exception):
@@ -56,12 +59,16 @@ def now_iso():
 # ---------------------------------------------------------------------------
 
 
-def run(argv, cwd=None, status=500):
+def run(argv, cwd=None, status=500, input_text=None, timeout=None):
     """Run argv (never a shell) and return stdout as text."""
     try:
-        proc = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              input=input_text.encode("utf-8") if input_text is not None else None,
+                              timeout=timeout)
     except OSError as e:
         raise TourError("cannot run %s: %s" % (argv[0], e), 500)
+    except subprocess.TimeoutExpired:
+        raise TourError("%s timed out after %ss" % (argv[0], timeout), 500)
     if proc.returncode != 0:
         err = proc.stderr.decode("utf-8", "replace").strip()
         raise TourError("%s failed: %s" % (" ".join(argv[:2]), err or "exit %d" % proc.returncode), status)
@@ -526,6 +533,706 @@ def default_base(repo, head, branch_names):
 
 
 # ---------------------------------------------------------------------------
+# Symbol index (v3): sqlite at <tours_dir>/index.db, built from the working tree
+# ---------------------------------------------------------------------------
+
+CTAGS = "ctags"
+C_EXTS = (".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx", ".inl")
+C_TU_EXTS = (".c", ".cc", ".cpp", ".cxx")
+JS_EXTS = (".js", ".mjs", ".cjs")
+PREPROCESS_TIMEOUT = 60
+MARKER_RE = re.compile(r'^# (\d+) "([^"]*)"((?: \d+)*)')
+
+INDEX_SCHEMA = """
+CREATE TABLE symbols (
+    name TEXT NOT NULL, kind TEXT NOT NULL, file TEXT NOT NULL, line INTEGER NOT NULL,
+    target TEXT NOT NULL, scope TEXT NOT NULL DEFAULT '', static INTEGER NOT NULL DEFAULT 0,
+    signature TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX symbols_name ON symbols(name);
+CREATE TABLE binary_symbols (target TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL);
+CREATE INDEX binary_symbols_name ON binary_symbols(name);
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+"""
+
+
+def index_path(repo, cfg):
+    return os.path.join(tours_dir(repo, cfg), "index.db")
+
+
+def ensure_tours_gitignore(repo, cfg):
+    """The index is derived data; keep it out of git without touching the repo's own .gitignore."""
+    path = os.path.join(tours_dir(repo, cfg), ".gitignore")
+    if not os.path.exists(path):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("index.db\nindex.db.tmp\n.tmp-*\n")
+
+
+def repo_files(repo):
+    """Tracked files, repo-relative, as git sees them."""
+    out = git(repo, "ls-files", "-z", "--cached", "--exclude-standard")
+    return [f for f in out.split("\0") if f]
+
+
+def glob_to_re(pattern):
+    """'src/ctl/**' style globs: ** crosses directories, * and ? do not."""
+    out = ""
+    i = 0
+    while i < len(pattern):
+        c = pattern[i]
+        if pattern.startswith("**", i):
+            out += ".*"
+            i += 2
+            if i < len(pattern) and pattern[i] == "/":
+                out += "/?"
+                i += 1
+        elif c == "*":
+            out += "[^/]*"
+            i += 1
+        elif c == "?":
+            out += "[^/]"
+            i += 1
+        else:
+            out += re.escape(c)
+            i += 1
+    return re.compile("^" + out + "$")
+
+
+def glob_match(path, pattern):
+    return bool(glob_to_re(pattern).match(path))
+
+
+def targets_of(cfg):
+    """Configured targets, or one implicit target covering the whole repo."""
+    targets = cfg.get("targets")
+    if not isinstance(targets, dict) or not targets:
+        return {cfg["name"] or "default": {"sources": ["**"]}}
+    out = {}
+    for name, t in targets.items():
+        if not isinstance(t, dict):
+            raise TourError("tour.json: target %r must be an object" % name, 500)
+        t = dict(t)
+        t.setdefault("sources", ["**"])
+        out[name] = t
+    return out
+
+
+def file_targets(cfg, path):
+    """Names of the targets whose sources include this path."""
+    return [name for name, t in targets_of(cfg).items() if any(glob_match(path, p) for p in t["sources"])]
+
+
+def index_python(repo, rel, target):
+    """Classes, functions (sync and async), methods and top-level assignments, via the stdlib ast."""
+    with open(os.path.join(repo, rel), "rb") as f:
+        source = f.read()
+    tree = ast.parse(source, rel)
+    rows = []
+
+    def walk(body, scope):
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                kind = "method" if scope and scope_kinds.get(scope) == "class" else "function"
+                rows.append((node.name, kind, rel, node.lineno, target, scope, 0, "(%s)" % ", ".join(a.arg for a in node.args.args)))
+                inner = (scope + "." if scope else "") + node.name
+                scope_kinds[inner] = "function"
+                walk(node.body, inner)
+            elif isinstance(node, ast.ClassDef):
+                rows.append((node.name, "class", rel, node.lineno, target, scope, 0, ""))
+                inner = (scope + "." if scope else "") + node.name
+                scope_kinds[inner] = "class"
+                walk(node.body, inner)
+            elif not scope and isinstance(node, (ast.Assign, ast.AnnAssign)):
+                names = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for t in names:
+                    for n in ast.walk(t):
+                        if isinstance(n, ast.Name):
+                            rows.append((n.id, "variable", rel, node.lineno, target, "", 0, ""))
+
+    scope_kinds = {}
+    walk(tree.body, "")
+    return rows
+
+
+EXT_DEFINE_RE = re.compile(r"""Ext\.define\s*\(\s*['"]([\w.]+)['"]\s*,\s*\{""")
+EXT_PROP_RE = re.compile(r"""\b(extend|alias|xtype|requires)\s*:\s*(\[[^\]]*\]|['"][^'"]*['"])""")
+
+
+def _strings_in(expr):
+    return re.findall(r"""['"]([^'"]+)['"]""", expr)
+
+
+def index_sencha(repo, rel, target):
+    """Ext.define classes with their extend parent, aliases / xtypes and requires."""
+    with open(os.path.join(repo, rel), encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    rows = []
+    defines = list(EXT_DEFINE_RE.finditer(text))
+    for i, m in enumerate(defines):
+        cls = m.group(1)
+        line = text.count("\n", 0, m.start()) + 1
+        end = defines[i + 1].start() if i + 1 < len(defines) else len(text)
+        body = text[m.end():end]
+        rows.append((cls, "class", rel, line, target, "Ext.define", 0, ""))
+        # Only properties at the top level of the config object define the class;
+        # an `xtype:` nested inside `items: [...]` is a use, not a definition.
+        depth = 1
+        pos = 0
+        for pm in EXT_PROP_RE.finditer(body):
+            depth += body.count("{", pos, pm.start()) - body.count("}", pos, pm.start())
+            pos = pm.start()
+            if depth != 1:
+                continue
+            prop, value = pm.group(1), pm.group(2)
+            values = _strings_in(value)
+            if prop == "extend" and values:
+                rows.append((cls, "extends", rel, line, target, values[0], 0, ""))
+            elif prop == "alias":
+                for a in values:
+                    rows.append((a, "alias", rel, line, target, cls, 0, ""))
+                    if a.startswith("widget."):
+                        rows.append((a[len("widget."):], "xtype", rel, line, target, cls, 0, ""))
+            elif prop == "xtype":
+                for x in values:
+                    rows.append((x, "xtype", rel, line, target, cls, 0, ""))
+                    rows.append(("widget." + x, "alias", rel, line, target, cls, 0, ""))
+            elif prop == "requires":
+                for r in values:
+                    rows.append((r, "requires", rel, line, target, cls, 0, ""))
+    return rows
+
+
+def ctags_version():
+    out = run([CTAGS, "--version"], status=500)
+    first = out.splitlines()[0] if out else ""
+    if "Universal" not in first:
+        raise TourError("need Universal Ctags for JSON output, found: %s" % (first or "unknown"), 500)
+    return first
+
+
+def run_ctags(repo, files, target, languages, extra=()):
+    """Tag a list of repo-relative files.  Returns symbol rows."""
+    if not files:
+        return []
+    argv = [CTAGS, "--output-format=json", "--fields=+nSKf", "--kinds-c=+p", "--languages=" + languages,
+            "-L", "-"] + list(extra)
+    out = run(argv, cwd=repo, input_text="\n".join(files) + "\n", status=500, timeout=600)
+    return parse_ctags_json(out, target)
+
+
+def parse_ctags_json(text, target):
+    rows = []
+    for line in text.splitlines():
+        if not line.startswith("{"):
+            continue
+        try:
+            tag = json.loads(line)
+        except ValueError:
+            continue
+        if tag.get("_type") != "tag" or not tag.get("name") or not tag.get("line"):
+            continue
+        scope = ("%s:%s" % (tag["scopeKind"], tag["scope"])) if tag.get("scope") else ""
+        rows.append((tag["name"], tag.get("kind", ""), tag["path"], int(tag["line"]), target, scope,
+                     1 if tag.get("file") else 0, tag.get("signature", "") or ""))
+    return rows
+
+
+def read_nm(repo, binary_rel):
+    """Defined symbols of a binary: (name, type letter)."""
+    out = run(["nm", "--defined-only", repo_path(repo, binary_rel)], status=500, timeout=120)
+    syms = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 3:
+            syms.append((parts[-1], parts[-2]))
+        elif len(parts) == 2:
+            syms.append((parts[1], parts[0]))
+    return syms
+
+
+def _strip_compile_args(argv, tu):
+    """Keep the flags that affect preprocessing; drop output/dependency options and the source file."""
+    keep = []
+    skip_next = False
+    tu_base = os.path.basename(tu)
+    for a in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if a in ("-c", "-S", "-E", "-MD", "-MMD", "-MP", "-M", "-MM", "-pipe"):
+            continue
+        if a in ("-o", "-MF", "-MT", "-MQ"):
+            skip_next = True
+            continue
+        if a.startswith("-o") and len(a) > 2 and not a.startswith("-O"):
+            continue
+        if os.path.basename(a) == tu_base and a.endswith(C_TU_EXTS):
+            continue
+        keep.append(a)
+    return keep
+
+
+def compile_flags(repo, target, tu, cc_cache=None):
+    """(compiler argv0, flags, cwd) for one translation unit.
+
+    compile_commands.json is preferred; cflags from tour.json is the fallback.
+    """
+    cc_rel = target.get("compile_commands")
+    if cc_rel:
+        cc_abs = repo_path(repo, cc_rel)
+        entries = None
+        if cc_cache is not None:
+            entries = cc_cache.get(cc_abs)
+        if entries is None:
+            try:
+                with open(cc_abs, encoding="utf-8") as f:
+                    entries = json.load(f)
+            except (OSError, ValueError) as e:
+                raise TourError("%s: %s" % (cc_rel, e), 500)
+            if cc_cache is not None:
+                cc_cache[cc_abs] = entries
+        want = os.path.realpath(os.path.join(repo, tu))
+        for e in entries:
+            if not isinstance(e, dict) or not e.get("file"):
+                continue
+            directory = e.get("directory") or repo
+            if not os.path.isdir(directory):
+                directory = repo  # database generated elsewhere: relative flags resolve from the repo root
+            if os.path.realpath(os.path.join(directory, e["file"])) != want:
+                continue
+            argv = e.get("arguments") or shlex.split(e.get("command", ""))
+            if not argv:
+                continue
+            return argv[0], _strip_compile_args(argv[1:], tu), directory
+    return target.get("compiler", "gcc"), list(target.get("cflags") or []), repo
+
+
+def preprocess(repo, target, tu, cc_cache=None):
+    """Run the compiler's preprocessor on one translation unit with the target's flags."""
+    compiler, flags, cwd = compile_flags(repo, target, tu, cc_cache)
+    src = os.path.join(repo, tu) if os.path.realpath(cwd) != os.path.realpath(repo) else tu
+    argv = [compiler, "-E", "-dD"] + flags + [src]
+    try:
+        text = run(argv, cwd=cwd, status=500, timeout=PREPROCESS_TIMEOUT)
+    except TourError as e:
+        if compiler not in ("gcc", "clang") and "cannot run" in str(e):
+            text = run(["gcc", "-E", "-dD"] + flags + [src], cwd=cwd, status=500, timeout=PREPROCESS_TIMEOUT)
+        else:
+            raise
+    return text, cwd
+
+
+def parse_line_markers(text):
+    """Map each line of preprocessed output back to its origin.
+
+    Returns one entry per output line: (file, line, is_system) for source lines,
+    None for the `# <line> "<file>" <flags>` marker lines themselves.
+    """
+    mapping = []
+    cur_file, cur_line, cur_sys = None, 0, False
+    for raw in text.split("\n"):
+        m = MARKER_RE.match(raw)
+        if m:
+            cur_line = int(m.group(1))
+            cur_file = m.group(2)
+            flags = set(m.group(3).split())
+            cur_sys = "3" in flags or cur_file.startswith("<")
+            mapping.append(None)
+            continue
+        mapping.append((cur_file, cur_line, cur_sys))
+        cur_line += 1
+    return mapping
+
+
+def rel_in_repo(path, cwd, repo):
+    """Repo-relative form of a path the preprocessor printed, or None if it is outside the repo."""
+    if not path:
+        return None
+    root = os.path.realpath(repo)
+    abs_path = os.path.realpath(os.path.join(cwd, path))
+    if abs_path == root or not abs_path.startswith(root + os.sep):
+        return None
+    return os.path.relpath(abs_path, root).replace(os.sep, "/")
+
+
+def index_macros(repo, target, target_name, tu, basic_keys, macro_names, cc_cache=None):
+    """Symbols that only exist after preprocessing (e.g. DEFINE_HANDLER(foo) -> foo_handler).
+
+    Returns (rows, drop) where drop lists (file, line) of basic-pass tags that were
+    really macro invocations misread as definitions.
+    """
+    text, cwd = preprocess(repo, target, tu, cc_cache)
+    mapping = parse_line_markers(text)
+    fd, tmp = tempfile.mkstemp(prefix="tour-pp-", suffix=".c")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        out = run([CTAGS, "--output-format=json", "--fields=+nSKf", "--kinds-c=+p-d", "--language-force=C", tmp],
+                  status=500, timeout=120)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    rows, drop = [], set()
+    source_lines = {}
+    for name, kind, _path, line, _t, scope, static, sig in parse_ctags_json(out, target_name):
+        idx = line - 1
+        if idx < 0 or idx >= len(mapping) or mapping[idx] is None:
+            continue
+        src_file, src_line, is_sys = mapping[idx]
+        if is_sys:
+            continue
+        rel = rel_in_repo(src_file, cwd, repo)
+        if not rel:
+            continue
+        if (rel, src_line, name) in basic_keys:
+            continue  # ctags already saw this one in the source itself
+        if _line_has_word(repo, rel, src_line, name, source_lines):
+            # Spelled out in the source, so not macro-generated: ctags just missed it
+            # (typically because a macro invocation above confused its parser).
+            rows.append((name, kind, rel, src_line, target_name, scope, static, sig))
+            continue
+        rows.append((name, "macro-generated", rel, src_line, target_name, kind, static, sig))
+        if kind in ("function", "variable", "prototype"):
+            drop.add((rel, src_line))
+    return rows, drop
+
+
+def _line_has_word(repo, rel, line, word, cache):
+    lines = cache.get(rel)
+    if lines is None:
+        try:
+            with open(os.path.join(repo, rel), encoding="utf-8", errors="replace") as f:
+                lines = f.read().split("\n")
+        except OSError:
+            lines = []
+        cache[rel] = lines
+    if line < 1 or line > len(lines):
+        return False
+    return re.search(r"\b%s\b" % re.escape(word), lines[line - 1]) is not None
+
+
+def index_stale(repo, cfg):
+    """True when the index is missing or any tracked file (or tour.json) is newer than it."""
+    path = index_path(repo, cfg)
+    if not os.path.exists(path):
+        return True
+    try:
+        db = sqlite3.connect(path)
+        row = db.execute("SELECT value FROM meta WHERE key='built_at'").fetchone()
+        count = db.execute("SELECT value FROM meta WHERE key='file_count'").fetchone()
+        db.close()
+    except sqlite3.Error:
+        return True
+    if not row:
+        return True
+    built_at = float(row[0])
+    files = repo_files(repo)
+    if count and int(count[0]) != len(files):
+        return True
+    for rel in files + ["tour.json"]:
+        try:
+            if os.stat(os.path.join(repo, rel)).st_mtime > built_at:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def build_index(repo, cfg, progress=None):
+    """Rebuild the whole index into a temp file, then swap it in atomically."""
+    started = time.time()
+    ensure_tours_gitignore(repo, cfg)
+    final = index_path(repo, cfg)
+    tmp = final + ".tmp"
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+    files = repo_files(repo)
+    targets = targets_of(cfg)
+    errors = []
+    rows = []
+
+    def note(msg):
+        if progress:
+            progress(msg)
+
+    def first_target(path):
+        names = file_targets(cfg, path)
+        return names[0] if names else ""
+
+    # Python: stdlib ast, never ctags.
+    for rel in files:
+        if rel.endswith((".py", ".pyi")):
+            try:
+                rows += index_python(repo, rel, first_target(rel))
+            except (SyntaxError, ValueError, OSError) as e:
+                errors.append("%s: %s" % (rel, e))
+
+    # Sencha: regex pass over every .js file.
+    js_files = [f for f in files if f.endswith(JS_EXTS)]
+    for rel in js_files:
+        try:
+            rows += index_sencha(repo, rel, first_target(rel))
+        except OSError as e:
+            errors.append("%s: %s" % (rel, e))
+
+    have_ctags = True
+    try:
+        ctags_version()
+    except TourError as e:
+        have_ctags = False
+        errors.append("ctags unavailable, C and JavaScript functions are not indexed: %s" % e)
+
+    c_tus = {}
+    if have_ctags:
+        for name, t in targets.items():
+            note("ctags: " + name)
+            c_files = [f for f in files if f.endswith(C_EXTS) and any(glob_match(f, p) for p in t["sources"])]
+            c_tus[name] = [f for f in c_files if f.endswith(C_TU_EXTS)]
+            try:
+                rows += run_ctags(repo, c_files, name, "C,C++")
+            except TourError as e:
+                errors.append("ctags %s: %s" % (name, e))
+        by_target = {}
+        for rel in js_files:
+            by_target.setdefault(first_target(rel), []).append(rel)
+        for name, group in by_target.items():
+            try:
+                rows += run_ctags(repo, group, name, "JavaScript")
+            except TourError as e:
+                errors.append("ctags javascript: %s" % e)
+
+    db = sqlite3.connect(tmp)
+    try:
+        db.executescript(INDEX_SCHEMA)
+        # nm: which names each binary actually contains.
+        for name, t in targets.items():
+            binary = t.get("binary")
+            if not binary:
+                continue
+            try:
+                if not os.path.exists(repo_path(repo, binary)):
+                    errors.append("%s: binary %s not built, nm disambiguation off" % (name, binary))
+                    continue
+                db.executemany("INSERT INTO binary_symbols VALUES (?, ?, ?)",
+                               [(name, s, ty) for s, ty in read_nm(repo, binary)])
+            except TourError as e:
+                errors.append("nm %s: %s" % (name, e))
+
+        # Macro-generated definitions: preprocess each translation unit.
+        if have_ctags:
+            basic_keys = set((r[2], r[3], r[0]) for r in rows)
+            macro_names = set(r[0] for r in rows if r[1] == "macro")
+            cc_cache = {}
+            seen = set()
+            drop_all = set()
+            for name, t in targets.items():
+                for tu in c_tus.get(name, []):
+                    note("preprocess: %s (%s)" % (tu, name))
+                    try:
+                        extra, drop = index_macros(repo, t, name, tu, basic_keys, macro_names, cc_cache)
+                    except TourError as e:
+                        errors.append("%s (%s): %s" % (tu, name, str(e).splitlines()[0][:300]))
+                        continue
+                    for r in extra:
+                        key = (r[0], r[2], r[3], r[4])
+                        if key not in seen:
+                            seen.add(key)
+                            rows.append(r)
+                    drop_all |= drop
+            if drop_all:
+                rows = [r for r in rows if not (r[1] == "function" and r[0] in macro_names and (r[2], r[3]) in drop_all)]
+
+        db.executemany("INSERT INTO symbols VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+        meta = {
+            "built_at": repr(time.time()),
+            "file_count": str(len(files)),
+            "duration": "%.2f" % (time.time() - started),
+            "errors": json.dumps(errors),
+            "targets": json.dumps(sorted(targets)),
+        }
+        db.executemany("INSERT INTO meta VALUES (?, ?)", list(meta.items()))
+        db.commit()
+    finally:
+        db.close()
+    os.replace(tmp, final)
+    return index_status(repo, cfg)
+
+
+def index_status(repo, cfg):
+    path = index_path(repo, cfg)
+    if not os.path.exists(path):
+        return {"exists": False, "symbols": 0, "by_target": {}, "by_kind": {}, "errors": [], "built_at": None}
+    db = sqlite3.connect(path)
+    try:
+        meta = dict(db.execute("SELECT key, value FROM meta").fetchall())
+        total = db.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+        by_target = dict(db.execute("SELECT target, COUNT(*) FROM symbols GROUP BY target").fetchall())
+        by_kind = dict(db.execute("SELECT kind, COUNT(*) FROM symbols GROUP BY kind").fetchall())
+        binaries = dict(db.execute("SELECT target, COUNT(*) FROM binary_symbols GROUP BY target").fetchall())
+    finally:
+        db.close()
+    built = float(meta.get("built_at", 0) or 0)
+    return {
+        "exists": True,
+        "symbols": total,
+        "by_target": by_target,
+        "by_kind": by_kind,
+        "binaries": binaries,
+        "errors": json.loads(meta.get("errors", "[]")),
+        "built_at": datetime.datetime.fromtimestamp(built).replace(microsecond=0).isoformat() if built else None,
+        "duration": float(meta.get("duration", 0) or 0),
+        "file_count": int(meta.get("file_count", 0) or 0),
+    }
+
+
+def lookup_symbol(repo, cfg, name, target=None, file=None):
+    """Definitions of a name, best first.
+
+    Ranking: a static symbol in the file you clicked from wins; then the wanted
+    target; then names the target's binary actually contains (nm); prototypes and
+    `requires` entries sink.  `preferred` is set when the top hit clearly wins.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise TourError("name is required")
+    name = name.strip()
+    path = index_path(repo, cfg)
+    if not os.path.exists(path):
+        raise TourError("symbol index not built yet", 404)
+    if file:
+        file = safe_rel_path(file)
+    if not target and file:
+        names = file_targets(cfg, file)
+        target = names[0] if len(names) == 1 else None
+    db = sqlite3.connect(path)
+    try:
+        rows = db.execute("SELECT name, kind, file, line, target, scope, static, signature FROM symbols WHERE name=?", (name,)).fetchall()
+        in_bin = set(r[0] for r in db.execute("SELECT target FROM binary_symbols WHERE name=?", (name,)).fetchall())
+    finally:
+        db.close()
+    extends = {(f, line): scope for n, kind, f, line, t, scope, static, sig in rows if kind == "extends"}
+    merged = {}
+    for n, kind, f, line, t, scope, static, sig in rows:
+        if kind == "extends":
+            continue  # metadata about the class entry at the same spot
+        score = 0
+        if static and file:
+            score += 100 if f == file else -50
+        if target and t == target:
+            score += 40
+        if t in in_bin and (not target or t == target):
+            score += 20
+        if kind in ("prototype", "requires"):
+            score -= 30
+        if f == file:
+            score += 5
+        key = (kind, f, line, scope)
+        d = merged.get(key)
+        if d is None:
+            d = merged[key] = {"name": n, "kind": kind, "file": f, "line": line, "target": t, "targets": [],
+                               "scope": scope, "static": bool(static), "signature": sig, "in_binary": False, "score": score}
+            if kind == "class" and (f, line) in extends:
+                d["extends"] = extends[(f, line)]
+        # The same definition shared by several targets (common sources) is one entry.
+        if t not in d["targets"]:
+            d["targets"].append(t)
+        if score > d["score"] or (score == d["score"] and t == target):
+            d["score"], d["target"] = score, t
+        d["in_binary"] = d["in_binary"] or t in in_bin
+    defs = sorted(merged.values(), key=lambda d: (-d["score"], d["target"], d["file"], d["line"]))
+    preferred = None
+    if len(defs) == 1 or (len(defs) > 1 and defs[0]["score"] > defs[1]["score"]):
+        preferred = 0
+    return {"name": name, "target": target, "definitions": defs, "preferred": preferred}
+
+
+def expand_range(repo, cfg, file, start, end, target=None):
+    """Preprocessed text for a line range of a C file, for the "expand macros" toggle."""
+    rel = safe_rel_path(file)
+    if not rel.endswith(C_EXTS):
+        raise TourError("only C files can be expanded")
+    targets = targets_of(cfg)
+    if not target:
+        names = file_targets(cfg, rel)
+        if not names:
+            raise TourError("%s is not in any target's sources" % rel)
+        target = names[0]
+    if target not in targets:
+        raise TourError("unknown target: %s" % target, 404)
+    try:
+        start, end = int(start), int(end)
+    except (TypeError, ValueError):
+        raise TourError("start and end must be integers")
+    tu = rel
+    if not rel.endswith(C_TU_EXTS):
+        # A header has no flags of its own: preprocess the first translation unit that includes it.
+        for cand in repo_files(repo):
+            if cand.endswith(C_TU_EXTS) and any(glob_match(cand, p) for p in targets[target]["sources"]):
+                try:
+                    with open(os.path.join(repo, cand), encoding="utf-8", errors="replace") as f:
+                        if os.path.basename(rel) in f.read():
+                            tu = cand
+                            break
+                except OSError:
+                    continue
+    text, cwd = preprocess(repo, targets[target], tu)
+    mapping = parse_line_markers(text)
+    lines = text.split("\n")
+    out = []
+    for i, m in enumerate(mapping):
+        if m is None or m[2]:
+            continue
+        if rel_in_repo(m[0], cwd, repo) == rel and start <= m[1] <= end:
+            out.append({"line": m[1], "text": lines[i]})
+    return {"file": rel, "target": target, "start": start, "end": end, "lines": out}
+
+
+class IndexWorker:
+    """Builds the index in a background thread; at most one build at a time."""
+
+    def __init__(self, repo):
+        self.repo = repo
+        self.lock = threading.Lock()
+        self.thread = None
+        self.progress = ""
+        self.error = None
+
+    def building(self):
+        return self.thread is not None and self.thread.is_alive()
+
+    def start(self, cfg, force=True):
+        with self.lock:
+            if self.building():
+                return False
+            if not force and not index_stale(self.repo, cfg):
+                return False
+            self.error = None
+            self.progress = "starting"
+            self.thread = threading.Thread(target=self._run, args=(cfg,), daemon=True)
+            self.thread.start()
+            return True
+
+    def _run(self, cfg):
+        def progress(msg):
+            self.progress = msg
+        try:
+            build_index(self.repo, cfg, progress)
+        except Exception as e:  # noqa: BLE001 - surfaced through /api/index
+            self.error = str(e)
+        self.progress = ""
+
+    def status(self, cfg):
+        st = index_status(self.repo, cfg)
+        st["building"] = self.building()
+        st["progress"] = self.progress if self.building() else ""
+        if self.error:
+            st["errors"] = [self.error] + st.get("errors", [])
+        st["targets"] = sorted(targets_of(cfg))
+        return st
+
+
+# ---------------------------------------------------------------------------
 # Presenter state (v2).  Lives in memory: it only matters while a talk is on.
 # ---------------------------------------------------------------------------
 
@@ -538,6 +1245,7 @@ class PresenterState:
         self.review_id = None
         self.stop_index = 0
         self.mode = "stop"
+        self.peek = None
         self.updated = 0.0      # last presenter PUT
         self.last_follow = 0.0  # last projector poll
         self.review_version = 0  # bumped on every review save or flag, so open tabs refetch
@@ -548,6 +1256,7 @@ class PresenterState:
             "review_id": self.review_id,
             "stop_index": self.stop_index,
             "mode": self.mode,
+            "peek": self.peek,
             "age": round(now - self.updated, 3) if self.updated else None,
             "projector_age": round(now - self.last_follow, 3) if self.last_follow else None,
             "review_version": self.review_version,
@@ -574,8 +1283,13 @@ class PresenterState:
         mode = body.get("mode", "stop")
         if mode not in VIEW_MODES:
             raise TourError("mode must be one of %s" % ", ".join(VIEW_MODES))
+        peek = body.get("peek")
+        if peek is not None:
+            if not isinstance(peek, dict) or not isinstance(peek.get("line"), int):
+                raise TourError("peek must be {file, line}")
+            peek = {"file": safe_rel_path(peek.get("file")), "line": peek["line"], "name": str(peek.get("name") or "")}
         with self.lock:
-            self.review_id, self.stop_index, self.mode = review_id, stop_index, mode
+            self.review_id, self.stop_index, self.mode, self.peek = review_id, stop_index, mode, peek
             self.updated = time.time()
             return self.snapshot(self.updated)
 
@@ -596,6 +1310,10 @@ ROUTES = [
     ("GET", re.compile(r"^/api/refs$"), "api_refs"),
     ("GET", re.compile(r"^/api/state$"), "api_state_get"),
     ("PUT", re.compile(r"^/api/state$"), "api_state_put"),
+    ("GET", re.compile(r"^/api/symbol$"), "api_symbol"),
+    ("GET", re.compile(r"^/api/expand$"), "api_expand"),
+    ("GET", re.compile(r"^/api/index$"), "api_index"),
+    ("POST", re.compile(r"^/api/index/rebuild$"), "api_index_rebuild"),
 ]
 
 
@@ -732,6 +1450,20 @@ class Handler(BaseHTTPRequestHandler):
     def api_state_put(self, m, q):
         return self.server.state.put(self.read_json())
 
+    def api_symbol(self, m, q):
+        return lookup_symbol(self.repo, self.cfg, q.get("name"), q.get("target") or None, q.get("file") or None)
+
+    def api_expand(self, m, q):
+        return expand_range(self.repo, self.cfg, q.get("file"), q.get("start"), q.get("end"), q.get("target") or None)
+
+    def api_index(self, m, q):
+        return self.server.index.status(self.cfg)
+
+    def api_index_rebuild(self, m, q):
+        self.read_json()
+        self.server.index.start(self.cfg, force=True)
+        return self.server.index.status(self.cfg)
+
 
 class TourServer(ThreadingHTTPServer):
     allow_reuse_address = True
@@ -742,6 +1474,7 @@ class TourServer(ThreadingHTTPServer):
         self.repo = repo
         self.verbose = verbose
         self.state = PresenterState()
+        self.index = IndexWorker(repo)
 
 
 def main(argv=None):
@@ -750,6 +1483,7 @@ def main(argv=None):
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--host", default="127.0.0.1", help="bind address (use 0.0.0.0 to reach it from another machine)")
     ap.add_argument("--verbose", action="store_true", help="log every request")
+    ap.add_argument("--no-index", action="store_true", help="do not check or rebuild the symbol index at start")
     args = ap.parse_args(argv)
     try:
         repo = find_repo_root(os.path.abspath(args.repo))
@@ -760,6 +1494,9 @@ def main(argv=None):
     host = "localhost" if args.host in ("127.0.0.1", "0.0.0.0", "") else args.host
     print("tour: %s  (%s)" % (cfg["name"], repo))
     print("tour: http://%s:%d/" % (host, server.server_address[1]))
+    if not args.no_index:
+        if server.index.start(cfg, force=False):
+            print("tour: symbol index is stale, rebuilding in the background")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

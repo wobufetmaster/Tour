@@ -151,5 +151,66 @@ class StateTest(ServerCase):
             self.assertEqual(status, 400, body)
 
 
+
+@unittest.skipUnless(__import__("shutil").which("ctags") and __import__("shutil").which("gcc"), "needs ctags and gcc")
+class IndexHttpTest(ServerCase):
+    """Symbol index endpoints (v3) over HTTP, on the polyglot fixture."""
+
+    @classmethod
+    def setUpClass(cls):
+        from helpers import PolyglotRepo
+        cls.fx = PolyglotRepo()
+        cls.server = tour.TourServer(("127.0.0.1", 0), cls.fx.repo)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    def wait_built(self):
+        import time
+        for _ in range(200):
+            status, st = self.call("GET", "/api/index")
+            if st["exists"] and not st["building"]:
+                return st
+            time.sleep(0.05)
+        self.fail("index never finished building")
+
+    def test_rebuild_symbol_expand(self):
+        status, st = self.call("GET", "/api/symbol?name=handle")
+        self.assertEqual(status, 404)  # not built yet
+        status, st = self.call("POST", "/api/index/rebuild", {})
+        self.assertEqual(status, 200, st)
+        st = self.wait_built()
+        self.assertEqual(st["errors"], [])
+        self.assertEqual(st["targets"], ["flightctl", "flightd"])
+        self.assertGreater(st["symbols"], 30)
+
+        status, r = self.call("GET", "/api/symbol?name=handle&file=src/ctl/ctl.c")
+        self.assertEqual(status, 200, r)
+        self.assertEqual(r["target"], "flightctl")
+        self.assertEqual(r["definitions"][r["preferred"]]["file"], "src/ctl/ctl.c")
+        status, r = self.call("GET", "/api/symbol?name=handle&target=flightd")
+        self.assertEqual(r["definitions"][0]["file"], "src/daemon/daemon.c")
+        status, r = self.call("GET", "/api/symbol?name=nothing_here")
+        self.assertEqual((status, r["definitions"], r["preferred"]), (200, [], None))
+        status, r = self.call("GET", "/api/symbol?name=x&file=../etc/passwd")
+        self.assertEqual(status, 400)
+
+        status, r = self.call("GET", "/api/expand?file=src/ctl/ctl.c&start=14&end=14")
+        self.assertEqual(status, 200, r)
+        self.assertEqual(r["lines"][0]["text"], "int status_handler(int x) { return handle(x) + 1; }")
+        status, r = self.call("GET", "/api/expand?file=tools/report.py&start=1&end=2")
+        self.assertEqual(status, 400)
+
+    def test_state_accepts_peek(self):
+        status, st = self.call("PUT", "/api/state", {"review_id": "r", "stop_index": 0, "mode": "peek",
+                                                      "peek": {"file": "src/ctl/ctl.c", "line": 9, "name": "handle"}})
+        self.assertEqual(status, 200, st)
+        self.assertEqual(st["peek"], {"file": "src/ctl/ctl.c", "line": 9, "name": "handle"})
+        status, st = self.call("PUT", "/api/state", {"review_id": "r", "stop_index": 0, "mode": "peek", "peek": {"file": "../x", "line": 1}})
+        self.assertEqual(status, 400)
+        status, st = self.call("PUT", "/api/state", {"review_id": "r", "stop_index": 0, "mode": "stop"})
+        self.assertIsNone(st["peek"])
+
+
 if __name__ == "__main__":
     unittest.main()

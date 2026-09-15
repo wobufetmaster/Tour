@@ -36,6 +36,30 @@ are stored (default `.tours/`). See `CLAUDE.md` for the full schema.
 Flags are appended to the stop in the review file with a timestamp, so the
 follow-ups from a walkthrough end up in git with the review.
 
+## Symbols
+
+Click any name in a walkthrough, presenter tab or diff to jump to its
+definition (Esc returns). When a name means different things in different
+binaries you get a chooser; otherwise it jumps straight there. `m` in a
+walkthrough shows a C stop with its macros expanded.
+
+The index lives in `.tours/index.db` (gitignored automatically), is built from
+the working tree at server start when stale, and can be rebuilt from the home
+page. It needs universal-ctags on the path for C and JavaScript; Python is
+indexed with the standard library alone.
+
+- **Python:** classes, functions, methods, top-level assignments (stdlib `ast`).
+- **C:** ctags per target, tagged with the target name; `static` symbols
+  resolve to the file you clicked from; `nm` on each target's binary breaks
+  ties; every translation unit is preprocessed (`compile_commands.json` or
+  `cflags`) so macro-generated definitions map back to the macro invocation.
+- **JavaScript / Sencha:** ctags for functions, plus `Ext.define` classes with
+  their `extend`, `alias`, `xtype` and `requires`, so an xtype resolves to
+  its class.
+
+Targets come from `tour.json` (see `CLAUDE.md`); a repo without targets is one
+implicit target covering everything.
+
 ## Test
 
 ```
@@ -44,5 +68,6 @@ make test          # or: python3 -m unittest discover -s tests
 
 ## Status
 
-v1 (diff → stops → walkthrough) and v2 (presenter tab, live sync, flags) are
-done. Next per `CLAUDE.md`: v3 symbol index, v4 suggested context stops.
+v1 (diff → stops → walkthrough), v2 (presenter tab, live sync, flags) and
+v3 (symbol index, click-to-definition, macro expansion) are done. Next per
+`CLAUDE.md`: v4 suggested context stops.

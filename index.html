@@ -81,6 +81,20 @@ kbd { font: 11px var(--mono); background: var(--chrome2); border: 1px solid var(
 .t-pp { color: var(--pp); }
 .t-fn { color: var(--fn); }
 .t-dec { color: var(--dec); }
+.can-peek .t-id:hover, .can-peek .t-fn:hover, .can-peek .t-string:hover { text-decoration: underline; cursor: pointer; }
+.overlay .box.peek { width: min(1100px, 92vw); max-width: none; display: flex; flex-direction: column; max-height: 88vh; padding: 0; overflow: hidden; }
+.overlay .box.peek .peek-head { display: flex; gap: 10px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 13px; }
+.overlay .box.peek .walk-code { flex: 1; min-height: 200px; font-size: 13px; }
+.overlay .box.peek .peek-foot { display: flex; gap: 8px; align-items: center; padding: 8px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }
+.def-list { list-style: none; margin: 0; padding: 0; max-height: 60vh; overflow: auto; }
+.def-list li { display: grid; grid-template-columns: 90px 1fr auto; gap: 10px; align-items: baseline; padding: 6px 8px; border-radius: 3px; cursor: pointer; }
+.def-list li:hover { background: var(--hover); }
+.def-list .f { font-family: var(--mono); font-size: 12px; }
+.def-list .t { font-size: 11px; color: var(--muted); }
+.badge.k { background: var(--badge-context); color: var(--badge-context-fg); text-transform: none; letter-spacing: 0; }
+.badge.k.macro-generated { background: var(--badge-question); color: var(--badge-question-fg); }
+.badge.tgt { background: var(--accent-bg); color: var(--accent); text-transform: none; letter-spacing: 0; font-family: var(--mono); }
+.index-card .errs { font-family: var(--mono); font-size: 12px; color: var(--err-fg); white-space: pre-wrap; margin-top: 8px; }
 
 /* ---------- IDE frame: title bar / body / status bar ---------- */
 .ide { display: grid; grid-template-rows: auto 1fr auto; height: 100vh; background: var(--bg); }
@@ -364,7 +378,7 @@ function hlLine(line, lang, state) {
       else if (TYPES[lang].has(w)) push('type', w);
       else if (KEYWORDS[lang].has(w)) push('kw', w);
       else if (/^\s*\(/.test(rest.slice(w.length))) push('fn', w);
-      else push(null, w);
+      else push('id', w);
       i += w.length; continue;
     }
     if (lang === 'python' && (m = /^@[\w.]+/.exec(rest))) { push('dec', m[0]); i += m[0].length; continue; }
@@ -377,6 +391,131 @@ function hlLine(line, lang, state) {
 function hlLines(lines, lang) {
   let state = null;
   return lines.map(l => { const r = hlLine(l, lang, state); state = r.state; return r.html; });
+}
+
+/* =========================================================================
+ * Files at a commit, and a shared line-by-line code view
+ * ========================================================================= */
+
+const fileCache = new Map();  // "rev:path" -> Promise<{lines, html}>
+function fetchFile(path, rev) {
+  const key = rev + ':' + path;
+  if (!fileCache.has(key)) {
+    fileCache.set(key, api('GET', '/api/file?path=' + encodeURIComponent(path) + '&rev=' + encodeURIComponent(rev))
+      .then(r => ({ lines: r.lines, html: hlLines(r.lines, langFor(path)) })));
+  }
+  return fileCache.get(key);
+}
+
+function codeLine(no, html, cls, tag) {
+  return h('div', { class: 'ln ' + cls }, h('span', { class: 'no' }, no || ''), tag !== undefined ? h('span', { class: 'tag' }, tag) : null, h('span', { class: 'src', html }));
+}
+
+// Lines of a file with [start, end] highlighted; `context` lines around it, or the whole file.
+function fileView(f, start, end, opts) {
+  const n = f.lines.length;
+  const full = !!(opts && opts.full);
+  const ctx = opts && opts.context != null ? opts.context : 8;
+  const lo = full ? 1 : Math.max(1, start - ctx);
+  const hi = full ? n : Math.min(n, end + ctx);
+  const frag = document.createDocumentFragment();
+  if (!full && lo > 1) frag.append(h('div', { class: 'gap' }, '⋯ ' + (lo - 1) + ' lines above'));
+  for (let k = lo; k <= hi; k++) frag.append(codeLine(k, f.html[k - 1], k >= start && k <= end ? 'in' : 'dim'));
+  if (!full && hi < n) frag.append(h('div', { class: 'gap' }, '⋯ ' + (n - hi) + ' lines below'));
+  if (start > n) frag.append(h('div', { class: 'error' }, 'Range ' + start + '-' + end + ' is past the end of the file (' + n + ' lines).'));
+  return frag;
+}
+
+/* =========================================================================
+ * Click-to-definition (v3)
+ * ========================================================================= */
+
+// The identifier under a mouse position, or null.  Dotted names (App.view.Grid) stay whole.
+function wordAtPoint(x, y) {
+  let node = null, offset = 0;
+  if (document.caretPositionFromPoint) {
+    const p = document.caretPositionFromPoint(x, y);
+    if (p) { node = p.offsetNode; offset = p.offset; }
+  } else if (document.caretRangeFromPoint) {
+    const r = document.caretRangeFromPoint(x, y);
+    if (r) { node = r.startContainer; offset = r.startOffset; }
+  }
+  if (!node || node.nodeType !== 3) return null;
+  const text = node.nodeValue;
+  const isW = c => c !== undefined && /[\w$.]/.test(c);
+  let i = offset;
+  if (!isW(text[i]) && i > 0 && isW(text[i - 1])) i--;
+  if (!isW(text[i])) return null;
+  let a = i, b = i;
+  while (a > 0 && isW(text[a - 1])) a--;
+  while (b < text.length && isW(text[b])) b++;
+  const w = text.slice(a, b).replace(/^[.$]+|[.]+$/g, '');
+  return /^[A-Za-z_$]/.test(w) ? w : null;
+}
+
+async function findDefinitions(name, file) {
+  const q = n => '/api/symbol?name=' + encodeURIComponent(n) + (file ? '&file=' + encodeURIComponent(file) : '');
+  let r = await api('GET', q(name));
+  if (!r.definitions.length && name.includes('.')) r = await api('GET', q(name.split('.').pop()));
+  return r;
+}
+
+function defLabel(d) {
+  return d.file + ':' + d.line;
+}
+
+// Show a list of candidate definitions; calls onPick(def).
+function chooseDefinition(result, onPick, onClose) {
+  const close = () => { box.parentElement && box.parentElement.remove(); if (onClose) onClose(); };
+  const items = result.definitions.map(d => h('li', { onclick: () => { close(); onPick(d); } },
+    h('span', null, h('span', { class: 'badge k ' + d.kind }, d.kind)),
+    h('span', null, h('span', { class: 'f' }, defLabel(d)), d.signature ? h('span', { class: 'muted' }, ' ' + d.signature) : null,
+      d.scope ? h('div', { class: 't' }, d.kind === 'method' || d.kind === 'xtype' || d.kind === 'alias' ? 'in ' + d.scope : d.scope) : null,
+      d.extends ? h('div', { class: 't' }, 'extends ' + d.extends) : null),
+    h('span', null, d.targets.filter(Boolean).map(t => h('span', { class: 'badge tgt', title: d.in_binary ? 'present in this target\'s binary' : '' }, (d.in_binary ? '● ' : '') + t)))));
+  const box = h('div', { class: 'box', onclick: e => e.stopPropagation() },
+    h('h2', null, result.name + ' · ' + result.definitions.length + ' definitions' + (result.target ? ' · from ' + result.target : '')),
+    h('ul', { class: 'def-list' }, items),
+    h('p', { class: 'muted', style: 'margin:10px 0 0' }, 'Esc closes.'));
+  const overlay = h('div', { class: 'overlay', onclick: close });
+  overlay.append(box);
+  document.body.append(overlay);
+  return close;
+}
+
+// Look a name up and hand the winning definition to onPick, asking when it is ambiguous.
+async function jumpToDefinition(name, file, onPick, hooks) {
+  let r;
+  try { r = await findDefinitions(name, file); }
+  catch (e) { toast(/index/.test(e.message) ? 'No symbol index yet: rebuild it from the home page.' : e.message); return; }
+  if (!r.definitions.length) { toast('No definition found for ' + name); return; }
+  if (r.preferred != null) { onPick(r.definitions[r.preferred], r); return; }
+  if (hooks && hooks.onOpen) hooks.onOpen();
+  chooseDefinition(r, d => onPick(d, r), hooks && hooks.onClose);
+}
+
+/* ----- index status ----- */
+function indexSummary(st) {
+  if (st.building) return 'building index… ' + (st.progress || '');
+  if (!st.exists) return 'no symbol index yet';
+  const parts = [st.symbols + ' symbols'];
+  if (st.targets && st.targets.length) parts.push('targets: ' + st.targets.join(', '));
+  if (st.built_at) parts.push('built ' + st.built_at.replace('T', ' ') + ' in ' + st.duration + 's');
+  if (st.errors && st.errors.length) parts.push(st.errors.length + ' warning' + (st.errors.length === 1 ? '' : 's'));
+  return parts.join(' · ');
+}
+
+// Poll /api/index until a build finishes; calls onUpdate(status) each time.
+function watchIndex(onUpdate) {
+  let stop = false;
+  (async function tick() {
+    if (stop) return;
+    let st;
+    try { st = await api('GET', '/api/index'); } catch (e) { return; }
+    onUpdate(st);
+    if (st.building) setTimeout(tick, 1000);
+  })();
+  return () => { stop = true; };
 }
 
 /* =========================================================================
@@ -496,6 +635,7 @@ function showError(err) {
 
 function homeView() {
   document.title = 'Tour';
+  let stopWatch = null;
   (async () => {
     let cfg, reviews, refs, refsErr = null;
     try {
@@ -549,14 +689,31 @@ function homeView() {
       form = h('div', { class: 'error', style: 'margin:0' }, 'Cannot read git refs: ' + refsErr.message);
     }
 
+    const idxCard = h('div', { class: 'card index-card' });
+    const paintIndex = st => {
+      idxCard.innerHTML = '';
+      const btn = h('button', { class: 'small', disabled: st.building, onclick: async () => {
+        try { const r = await api('POST', '/api/index/rebuild', {}); paintIndex(r); if (stopWatch) stopWatch(); stopWatch = watchIndex(paintIndex); }
+        catch (e) { toast(e.message); }
+      } }, st.building ? 'building…' : (st.exists ? '⟳ Rebuild index' : '⟳ Build index'));
+      idxCard.append(
+        h('h2', null, 'Symbol index'),
+        h('div', { class: 'row' }, h('span', { class: 'grow' }, indexSummary(st)), btn),
+        st.exists && !st.building ? h('div', { class: 'muted', style: 'margin-top:6px;font-size:12px' },
+          Object.entries(st.by_target || {}).map(([t, n]) => (t || '(no target)') + ': ' + n).join(' · ')) : null,
+        st.errors && st.errors.length ? h('div', { class: 'errs' }, st.errors.slice(0, 8).join('\n') + (st.errors.length > 8 ? '\n… ' + (st.errors.length - 8) + ' more' : '')) : null,
+        h('div', { class: 'muted', style: 'margin-top:8px;font-size:12px' }, 'Built from the working tree: ctags for C and JavaScript, the stdlib ast for Python, nm for binaries, and the preprocessor for macro-generated symbols. Click any name in a walkthrough to jump to its definition.'));
+    };
+    stopWatch = watchIndex(paintIndex);
     app.append(h('div', { class: 'home' },
       h('div', { class: 'row' }, h('h1', { class: 'grow' }, 'Tour'), themeBtn()),
       h('div', { class: 'muted' }, cfg.name, ' · reviews live in ', h('code', null, cfg.tours_dir + '/')),
       h('div', { class: 'card' }, h('h2', null, 'Reviews'), list),
-      h('div', { class: 'card' }, h('h2', null, 'New review'), form)));
+      h('div', { class: 'card' }, h('h2', null, 'New review'), form),
+      idxCard));
     if (refs) app.querySelector('input[type=text]').focus();
   })();
-  return {};
+  return { destroy() { if (stopWatch) stopWatch(); } };
 }
 
 /* =========================================================================
@@ -881,9 +1038,15 @@ function authorView(id) {
     els.statusPos = h('span'); els.statusMode = h('span'); els.statusFile = h('span');
     els.files = h('ul', { class: 'tree' });
     els.path = h('span', { class: 'path' });
-    els.scroll = h('div', { class: 'editor-scroll' });
+    els.scroll = h('div', { class: 'editor-scroll can-peek' });
     els.stops = h('ul', { class: 'stop-list' });
     els.edit = h('div', { class: 'stop-edit' });
+    els.indexBtn = h('button', { class: 'small ghost', title: 'symbol index', onclick: async () => {
+      try { const st = await api('POST', '/api/index/rebuild', {}); paintIndexBtn(st); toast('Rebuilding the symbol index…'); S.stopWatch = watchIndex(paintIndexBtn); }
+      catch (e) { toast(e.message); }
+    } }, '⟳ index');
+    const paintIndexBtn = st => { els.indexBtn.textContent = st.building ? '⟳ indexing…' : '⟳ index'; els.indexBtn.title = indexSummary(st); };
+    S.stopWatch = watchIndex(paintIndexBtn);
     const modeBtn = h('button', { class: 'small ghost', onclick: () => { S.mode = S.mode === 'unified' ? 'side' : 'unified'; localStorage.setItem('tour.diffmode', S.mode); S.sel = null; modeBtn.textContent = S.mode === 'unified' ? '⇆ side-by-side' : '☰ unified'; renderDiff(); renderStatus(); } },
       S.mode === 'unified' ? '⇆ side-by-side' : '☰ unified');
     app.append(h('div', { class: 'ide author' },
@@ -893,6 +1056,7 @@ function authorView(id) {
         els.title,
         h('span', { class: 'muted sha' }, short(r.base) + ' → ' + short(r.head)),
         h('span', { class: 'grow' }),
+        els.indexBtn,
         themeBtn(),
         h('a', { href: '#present/' + encodeURIComponent(id), target: '_blank' }, h('button', { class: 'primary small' }, '🎤 Present')),
         h('a', { href: '#walk/' + encodeURIComponent(id), target: '_blank' }, h('button', { class: 'small' }, '▶ Walk'))),
@@ -927,6 +1091,15 @@ function authorView(id) {
       closeEditor();
       paintRows();
     });
+    // Click a name in the diff: jump to its definition in a modal; optionally add it as a context stop.
+    els.scroll.addEventListener('click', e => {
+      if (S.dragging || !e.target.closest('td.code') || e.detail !== 1) return;
+      if (window.getSelection && String(window.getSelection()).length) return;  // text selection, not a click
+      const name = wordAtPoint(e.clientX, e.clientY);
+      const f = S.files[S.fileIdx];
+      if (!name || !f) return;
+      jumpToDefinition(name, f.file, d => openPeek(name, d));
+    });
     els.scroll.addEventListener('mouseover', e => {
       if (!S.dragging || !S.sel) return;
       const tr = e.target.closest('tr[data-i]');
@@ -941,8 +1114,52 @@ function authorView(id) {
   }
   function onMouseUp() { S.dragging = false; }
 
+  // Definition viewer for the author: the file at head, scrolled to the definition.
+  async function openPeek(name, d) {
+    const code = h('div', { class: 'walk-code can-peek' });
+    const close = () => overlay.remove();
+    const addBtn = h('button', { class: 'primary small', onclick: () => {
+      const f = fileCache.get(S.review.head + ':' + d.file);
+      const line = d.line;
+      const st = { id: nextStopId(), file: d.file, start: line, end: line, side: 'head', kind: 'context',
+                   note: '`' + name + '` is defined here.', presenter_note: '', flags: [] };
+      stops().push(st);
+      scheduleSave();
+      close();
+      selectStop(st.id, { noScroll: true });
+      toast('Added context stop ' + stops().length + ' at ' + d.file + ':' + line);
+    } }, '+ Add as context stop');
+    const overlay = h('div', { class: 'overlay', onclick: close },
+      h('div', { class: 'box peek', onclick: e => e.stopPropagation() },
+        h('div', { class: 'peek-head' },
+          h('b', null, name), h('span', { class: 'badge k ' + d.kind }, d.kind),
+          h('span', { class: 'mono' }, defLabel(d)), d.signature ? h('span', { class: 'muted' }, d.signature) : null,
+          d.targets.filter(Boolean).map(t => h('span', { class: 'badge tgt' }, (d.in_binary ? '● ' : '') + t)),
+          h('span', { class: 'grow' }), addBtn, h('button', { class: 'small', onclick: close }, 'Close')),
+        code,
+        h('div', { class: 'peek-foot' }, 'Showing the file at head ', h('span', { class: 'sha' }, short(S.review.head)),
+          '. The index is built from the working tree, so lines can drift if it differs. Click another name to keep following. Esc closes.')));
+    document.body.append(overlay);
+    S.peekOverlay = overlay;
+    code.addEventListener('click', e => {
+      const n = wordAtPoint(e.clientX, e.clientY);
+      if (n) jumpToDefinition(n, d.file, d2 => { close(); openPeek(n, d2); });
+    });
+    try {
+      const f = await fetchFile(d.file, S.review.head);
+      code.append(fileView(f, d.line, d.line, { full: true }));
+      const first = code.querySelector('.ln.in');
+      if (first) first.scrollIntoView({ block: 'center' });
+    } catch (e) { code.append(h('div', { class: 'error' }, e.message)); }
+  }
+
   function onKey(e) {
-    if (e.key === 'Escape') { if (isTyping(e)) e.target.blur(); clearSelection(); return; }
+    if (e.key === 'Escape') {
+      const ov = document.querySelector('.overlay');
+      if (ov) { ov.remove(); return; }
+      if (isTyping(e)) e.target.blur(); clearSelection(); return;
+    }
+    if (document.querySelector('.overlay')) return;
     if (isTyping(e)) return;
     if (e.key === 'n' && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); openEditor(); return; }
     if ((e.ctrlKey || e.metaKey) && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && S.stopId) {
@@ -971,6 +1188,7 @@ function authorView(id) {
     destroy() {
       window.removeEventListener('beforeunload', flushOnLeave);
       document.removeEventListener('mouseup', onMouseUp);
+      if (S.stopWatch) S.stopWatch();
       flushOnLeave();
     },
   };
@@ -982,13 +1200,13 @@ function authorView(id) {
  *   #present/<id>  presenter: stop list, private notes, up-next; pushes state
  * ========================================================================= */
 
-const VIEW_MODES = ['stop', 'full', 'diff'];
+const VIEW_MODES = ['stop', 'full', 'diff', 'peek', 'expand'];
 
 function walkView(id, startIndex, presenter) {
   const S = {
     review: null, i: 0, mode: 'stop', files: new Map(), diff: null, goto: null, help: false, flag: null,
     font: parseInt(localStorage.getItem('tour.font'), 10) || 18, renderToken: 0,
-    following: false, projector: false, lastApplied: '', pollTimer: null, beatTimer: null,
+    following: false, projector: false, lastApplied: '', pollTimer: null, beatTimer: null, peek: null,
   };
   const els = {};
   const CONTEXT = 8;
@@ -998,14 +1216,7 @@ function walkView(id, startIndex, presenter) {
   const revFor = st => (st.side === 'base' ? S.review.base : S.review.head);
   const locOf = st => st.file + ':' + st.start + (st.end !== st.start ? '-' + st.end : '') + (st.side === 'base' ? ' (base)' : '');
 
-  async function getFile(path, rev) {
-    const key = rev + ':' + path;
-    if (!S.files.has(key)) {
-      S.files.set(key, api('GET', '/api/file?path=' + encodeURIComponent(path) + '&rev=' + encodeURIComponent(rev))
-        .then(r => ({ lines: r.lines, html: hlLines(r.lines, langFor(path)) })));
-    }
-    return S.files.get(key);
-  }
+  const getFile = fetchFile;
   async function getDiff() {
     if (!S.diff) S.diff = api('GET', '/api/diff?base=' + encodeURIComponent(S.review.base) + '&head=' + encodeURIComponent(S.review.head));
     return S.diff;
@@ -1015,7 +1226,7 @@ function walkView(id, startIndex, presenter) {
   async function pushState() {
     if (!presenter || !S.review) return;
     try {
-      const st = await api('PUT', '/api/state', { review_id: id, stop_index: S.i, mode: S.mode });
+      const st = await api('PUT', '/api/state', { review_id: id, stop_index: S.i, mode: S.mode, peek: S.mode === 'peek' ? S.peek : null });
       setProjector(st.projector_age != null && st.projector_age < 3);
       checkReviewVersion(st);
     } catch (e) { setProjector(false); }
@@ -1039,10 +1250,12 @@ function walkView(id, startIndex, presenter) {
     const live = st.review_id === id && st.age != null && st.age < 6;
     setFollowing(live);
     if (!live) { S.lastApplied = ''; return; }
-    const key = st.stop_index + ':' + st.mode;
+    const key = st.stop_index + ':' + st.mode + ':' + JSON.stringify(st.peek || null);
     if (key === S.lastApplied) return;
     S.lastApplied = key;
     S.mode = VIEW_MODES.includes(st.mode) ? st.mode : 'stop';
+    S.peek = st.mode === 'peek' && st.peek ? st.peek : null;
+    if (S.mode === 'peek' && !S.peek) S.mode = 'stop';
     go(st.stop_index, { keepMode: true, silent: true });
   }
   function setFollowing(on) {
@@ -1059,9 +1272,7 @@ function walkView(id, startIndex, presenter) {
   }
 
   /* ----- rendering ----- */
-  function lineEl(no, html, cls, tag) {
-    return h('div', { class: 'ln ' + cls }, h('span', { class: 'no' }, no || ''), tag !== undefined ? h('span', { class: 'tag' }, tag) : null, h('span', { class: 'src', html }));
-  }
+  const lineEl = codeLine;
 
   async function renderCode() {
     const st = cur();
@@ -1073,6 +1284,8 @@ function walkView(id, startIndex, presenter) {
     let frag;
     try {
       if (S.mode === 'diff') frag = await renderDiffCode(st);
+      else if (S.mode === 'peek' && S.peek) frag = fileView(await getFile(S.peek.file, S.review.head), S.peek.line, S.peek.line, { full: true });
+      else if (S.mode === 'expand') frag = await renderExpandCode(st);
       else frag = await renderFileCode(st, S.mode === 'full');
     } catch (e) {
       frag = h('div', { class: 'error' }, e.message);
@@ -1081,26 +1294,31 @@ function walkView(id, startIndex, presenter) {
     code.innerHTML = '';
     code.append(frag);
     const first = code.querySelector('.ln.in');
-    if (S.mode === 'full' && first) first.scrollIntoView({ block: 'center' });
+    if ((S.mode === 'full' || S.mode === 'peek') && first) first.scrollIntoView({ block: 'center' });
     else code.scrollTop = 0;
     const next = stops()[S.i + 1];
     if (next) getFile(next.file, revFor(next)).catch(() => {});
   }
 
   async function renderFileCode(st, full) {
-    const f = await getFile(st.file, revFor(st));
-    const n = f.lines.length;
-    const lo = full ? 1 : Math.max(1, st.start - CONTEXT);
-    const hi = full ? n : Math.min(n, st.end + CONTEXT);
+    return fileView(await getFile(st.file, revFor(st)), st.start, st.end, { full, context: CONTEXT });
+  }
+
+  // Preprocessed text for the stop's lines (C only), keyed by original line numbers.
+  async function renderExpandCode(st) {
+    const r = await api('GET', '/api/expand?file=' + encodeURIComponent(st.file) + '&start=' + st.start + '&end=' + st.end);
     const frag = document.createDocumentFragment();
-    if (!full && lo > 1) frag.append(h('div', { class: 'gap' }, '⋯ ' + (lo - 1) + ' lines above'));
-    for (let k = lo; k <= hi; k++) {
-      const inRange = k >= st.start && k <= st.end;
-      frag.append(lineEl(k, f.html[k - 1], inRange ? 'in' : 'dim'));
-    }
-    if (!full && hi < n) frag.append(h('div', { class: 'gap' }, '⋯ ' + (n - hi) + ' lines below'));
-    if (st.start > n) frag.append(h('div', { class: 'error' }, 'Stop range ' + st.start + '-' + st.end + ' is past the end of the file (' + n + ' lines).'));
+    frag.append(h('div', { class: 'hunk' }, 'macros expanded with ' + r.target + "'s flags"));
+    const html = hlLines(r.lines.map(l => l.text), 'c');
+    r.lines.forEach((l, i) => frag.append(lineEl(l.line, html[i], 'in')));
+    if (!r.lines.length) frag.append(h('div', { class: 'gap' }, 'Nothing left after preprocessing (all conditional-compiled out?).'));
     return frag;
+  }
+
+  // Click-to-definition: replace the code pane with the file at the definition until Esc.
+  function peekAt(name, d) {
+    S.peek = { file: d.file, line: d.line, name };
+    setMode('peek');
   }
 
   async function renderDiffCode(st) {
@@ -1174,9 +1392,13 @@ function walkView(id, startIndex, presenter) {
   function renderHead() {
     const st = cur();
     const total = stops().length;
-    els.loc.textContent = st ? locOf(st) : '';
+    els.loc.textContent = S.mode === 'peek' && S.peek ? S.peek.file + ':' + S.peek.line : (st ? locOf(st) : '');
     els.pos.textContent = total ? 'stop ' + (S.i + 1) + ' / ' + total : 'no stops';
-    els.modeEl.textContent = S.mode === 'full' ? 'FULL FILE · Esc returns' : S.mode === 'diff' ? 'DIFF · d returns' : (st ? (st.side === 'base' ? 'base' : 'head') : '');
+    els.modeEl.textContent = S.mode === 'full' ? 'FULL FILE · Esc returns'
+      : S.mode === 'diff' ? 'DIFF · d returns'
+      : S.mode === 'peek' ? 'DEFINITION OF ' + (S.peek ? S.peek.name : '') + ' · Esc returns'
+      : S.mode === 'expand' ? 'MACROS EXPANDED · m returns'
+      : (st ? (st.side === 'base' ? 'base' : 'head') : '');
   }
 
   function renderAll() { renderHead(); renderNote(); renderStops(); renderCode(); }
@@ -1192,6 +1414,7 @@ function walkView(id, startIndex, presenter) {
   }
   function setMode(mode) {
     S.mode = mode;
+    if (mode !== 'peek') S.peek = null;
     renderHead(); renderCode();
     pushState();
   }
@@ -1209,7 +1432,8 @@ function walkView(id, startIndex, presenter) {
     const rows = [
       ['Space / → / j', 'next stop'], ['← / k', 'previous stop'], ['Home / End', 'first / last stop'],
       ['g then a number, Enter', 'jump to a stop'], ['f', 'open the full file at this point'],
-      ['d', 'show the diff for this stop instead of the file'], ['Esc', 'back to the current stop'],
+      ['d', 'show the diff for this stop instead of the file'], ['m', 'expand macros for this stop (C)'],
+      ['click a name', 'jump to its definition'], ['Esc', 'back to the current stop'],
       ['x', 'flag this stop for follow-up'], ['+ / -', 'font size'], ['t', 'dark / light theme'], ['?', 'this help'],
     ];
     document.body.append(h('div', { class: 'overlay', onclick: hideOverlays },
@@ -1220,7 +1444,7 @@ function walkView(id, startIndex, presenter) {
           : 'Any key closes this.'))));
   }
   function hideOverlays() {
-    S.help = false; S.goto = null; S.flag = null;
+    S.help = false; S.goto = null; S.flag = null; S.chooser = false;
     document.querySelectorAll('.overlay, .goto').forEach(el => el.remove());
   }
   function paintGoto() {
@@ -1264,6 +1488,7 @@ function walkView(id, startIndex, presenter) {
     if (!S.review) return;
     if (S.flag !== null) return;  // the flag input handles its own keys
     if (S.help) { e.preventDefault(); hideOverlays(); return; }
+    if (S.chooser) { if (e.key === 'Escape') { e.preventDefault(); hideOverlays(); } return; }
     if (S.goto !== null) {
       e.preventDefault();
       if (/^\d$/.test(e.key)) S.goto += e.key;
@@ -1282,6 +1507,7 @@ function walkView(id, startIndex, presenter) {
     else if (k === 'f') { e.preventDefault(); setMode(S.mode === 'full' ? 'stop' : 'full'); }
     else if (k === 'd') { e.preventDefault(); setMode(S.mode === 'diff' ? 'stop' : 'diff'); }
     else if (k === 'Escape') { e.preventDefault(); setMode('stop'); }
+    else if (k === 'm') { e.preventDefault(); setMode(S.mode === 'expand' ? 'stop' : 'expand'); }
     else if (k === 'g') { e.preventDefault(); S.goto = ''; paintGoto(); }
     else if (k === 'x') { e.preventDefault(); openFlag(); }
     else if (k === '?') { e.preventDefault(); showHelp(); }
@@ -1299,7 +1525,14 @@ function walkView(id, startIndex, presenter) {
     els.pos = h('span', { class: 'pos' });
     els.modeEl = h('span', { class: 'mode' });
     els.sync = h('span', null, presenter ? '○ no projector yet' : '○ standalone');
-    els.code = h('div', { class: 'walk-code' });
+    els.code = h('div', { class: 'walk-code can-peek' });
+    els.code.addEventListener('click', e => {
+      if (window.getSelection && String(window.getSelection()).length) return;
+      const name = wordAtPoint(e.clientX, e.clientY);
+      if (!name) return;
+      const from = S.mode === 'peek' && S.peek ? S.peek.file : (cur() ? cur().file : null);
+      jumpToDefinition(name, from, d => peekAt(name, d), { onOpen: () => { S.chooser = true; }, onClose: () => { S.chooser = false; } });
+    });
     els.note = h('div', { class: 'walk-note' });
     els.stops = h('ul', { class: 'stop-list' });
     const body = presenter
